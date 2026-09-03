@@ -70,7 +70,20 @@ class PaprikaEngine:
 
         self._detector = PaprikaDetector(block)
 
-        self._use_shape_crosscheck = bool(block.get("shape_crosscheck", True))
+        self._use_shape_crosscheck = bool(block.get("shape_crosscheck", False))
+
+        # Bug die dit voorkomt: shape_crosscheck stond voor "gebruik het
+        # silhouet als TWEEDE mening naast de keypoints". Maar de klassieke
+        # backend leverde geen keypoints, dus met de cross-check uit had die
+        # helemaal geen hoekbron meer en rapporteerde hij "onbekend" op elke
+        # vrucht - detectie zonder antwoord.
+        #
+        # Beide kanten zijn nu gerepareerd: de klassieke backend levert echte
+        # keypoints uit steeldetectie, en de silhouetschatter draait alleen nog
+        # waar hij daadwerkelijk iets toevoegt. Twee instellingen die elkaar
+        # stilzwijgend uitschakelden, is precies het soort koppeling dat je
+        # alleen merkt als je het draait.
+        self._backend = self._detector.backend
         shape_cfg = block.get("shape") if isinstance(block.get("shape"), dict) else {}
         self._saturation_floor = int(shape_cfg.get("saturation_floor", 80))
         belt = shape_cfg.get("belt_hue") or [96, 145]
@@ -158,12 +171,18 @@ class PaprikaEngine:
         stem: Optional[Keypoint] = landmarks.get("stem_end")
         blossom: Optional[Keypoint] = landmarks.get("blossom_end")
 
+        # Het silhouet draait alleen als tweede mening naast bestaande
+        # keypoints. Zonder keypoints zou het de enige bron zijn, en op
+        # blokpaprika haalt die maar 66% op de vraag welk uiteinde de steel is -
+        # dan is "geen hoek" een eerlijker antwoord dan een muntworp.
+        use_shape = self._use_shape_crosscheck and stem is not None and blossom is not None
+
         result = orient.estimate(
-            frame=frame if self._use_shape_crosscheck else None,
+            frame=frame if use_shape else None,
             bbox=bbox,
             stem=stem,
             blossom=blossom,
-            use_shape=self._use_shape_crosscheck,
+            use_shape=use_shape,
             saturation_floor=self._saturation_floor,
             belt_hue=self._belt_hue,
             min_span_ratio=self._min_span_ratio,

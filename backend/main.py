@@ -14,7 +14,7 @@ import time
 
 import uvicorn
 
-from backend.core.camera import Camera
+from backend.core.image_source import build_source
 from backend.core.config_loader import cfg
 from backend.core.state import AppState
 from backend.core.tcp_trigger_server import TCPTriggerServer
@@ -96,7 +96,8 @@ def main():
     app_state = AppState()
     bind_app_state(app_state)
 
-    camera = Camera(0, app_state=app_state)
+    # Camera of map met ruwe beelden, zie camera.source in de config.
+    camera = build_source(app_state)
 
     web_cfg = cfg["web"]
     app = create_app(camera, app_state)

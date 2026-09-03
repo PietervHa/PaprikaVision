@@ -127,6 +127,12 @@ def create_app(camera, app_state) -> FastAPI:
 
             if DRAW_HUD:
                 lines = []
+                if is_folder:
+                    info = camera.status()
+                    lines.append(
+                        f"[{info['index']+1}/{info['count']}] {info['name']}"
+                        + ("  (vast)" if info["hold"] else "")
+                    )
                 if not overlay.is_running():
                     lines.append("Live overlay stopped")
                 elif snapshot["stale"]:
@@ -166,6 +172,43 @@ def create_app(camera, app_state) -> FastAPI:
             generate_frames(),
             media_type="multipart/x-mixed-replace; boundary=frame",
         )
+
+    # ------------------------------------------------------- bestandsbron
+    # Alleen aanwezig als de bron een map is. Zo hoeft de HMI niets te weten
+    # over welke bron actief is: de knoppen verschijnen als het endpoint
+    # bestaat en blijven weg als er een camera hangt.
+    is_folder = hasattr(camera, "status") and hasattr(camera, "next")
+
+    @app.get("/source")
+    def source_status():
+        if not is_folder:
+            return {"source": "camera"}
+        return camera.status()
+
+    @app.post("/source/next")
+    def source_next(request: Request):
+        if not is_folder:
+            return JSONResponse(status_code=400, content={"error": "geen bestandsbron"})
+        if not _is_maintenance_access(request):
+            return JSONResponse(status_code=403, content={"success": False})
+        return {"success": True, "name": camera.next(), **camera.status()}
+
+    @app.post("/source/previous")
+    def source_previous(request: Request):
+        if not is_folder:
+            return JSONResponse(status_code=400, content={"error": "geen bestandsbron"})
+        if not _is_maintenance_access(request):
+            return JSONResponse(status_code=403, content={"success": False})
+        return {"success": True, "name": camera.previous(), **camera.status()}
+
+    @app.post("/source/hold")
+    def source_hold(request: Request):
+        if not is_folder:
+            return JSONResponse(status_code=400, content={"error": "geen bestandsbron"})
+        if not _is_maintenance_access(request):
+            return JSONResponse(status_code=403, content={"success": False})
+        held = camera.set_hold(not camera.status()["hold"])
+        return {"success": True, "hold": held, **camera.status()}
 
     @app.get("/status")
     def get_status(request: Request, response: Response):

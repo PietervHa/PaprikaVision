@@ -27,7 +27,11 @@ from backend.core.paprika_engine import PaprikaEngine  # noqa: E402
 from backend.detection.paprika import orientation as orient  # noqa: E402
 from backend.detection.paprika.orientation import Keypoint  # noqa: E402
 
-BELT = (198, 198, 196)
+# Blauwe band, zoals de echte lijn. Sterk verzadigd, dus dit test meteen dat de
+# segmentatie op hue werkt en niet op saturatie - een grijze testband zou die
+# fout juist verbergen.
+BELT = (200, 90, 30)
+STEM_COLOUR = (60, 150, 70)
 COLORS = {
     "red": (40, 40, 215),
     "yellow": (45, 215, 235),
@@ -43,6 +47,7 @@ def render_paprika(
     shoulder_w: int = 94,
     tip_w: int = 50,
     color=COLORS["red"],
+    with_stem: bool = False,
 ):
     """Synthetic paprika: wide shoulder tapering to a narrower tip.
 
@@ -76,6 +81,13 @@ def render_paprika(
 
     stem = (cx + ca * length / 2, cy - sa * length / 2)
     blossom = (cx - ca * length / 2, cy + sa * length / 2)
+
+    if with_stem:
+        # Groen steeltje aan de calyx-kant, zodat de klassieke backend hier
+        # hetzelfde pad aflegt als op de echte beelden.
+        tip = (int(round(stem[0] + ca * 42)), int(round(stem[1] - sa * 42)))
+        cv2.line(image, (int(stem[0]), int(stem[1])), tip, STEM_COLOUR, 13, cv2.LINE_AA)
+
     return image, stem, blossom
 
 
@@ -262,8 +274,14 @@ def test_axis_disagreement_lowers_confidence_rather_than_averaging():
 def _engine(**overrides):
     block = {
         "backend": "shape",
-        "shape_crosscheck": True,
-        "shape": {"saturation_floor": 60, "min_area_px": 3000, "max_area_ratio": 0.7},
+        "shape_crosscheck": False,
+        "shape": {
+            "saturation_floor": 80,
+            "belt_hue": [96, 145],
+            "value_floor": 45,
+            "min_area_px": 3000,
+            "max_area_ratio": 0.7,
+        },
         "policy": {
             "min_angle_confidence": 0.45,
             "min_flip_confidence": 0.40,
@@ -277,7 +295,7 @@ def _engine(**overrides):
 
 
 def test_engine_places_a_clear_fruit():
-    image, _, _ = render_paprika(25)
+    image, _, _ = render_paprika(25, with_stem=True)
     result = _engine().evaluate(image)
 
     assert result["status"] == "OK"
@@ -286,15 +304,31 @@ def test_engine_places_a_clear_fruit():
     assert orient.angular_difference(primary["angle_plc"], 25) < 5.0
 
 
-def test_engine_sends_an_ambiguous_fruit_for_reorientation():
-    """Symmetric fruit: the axis is fine, the stem end is a coin flip. The
-    machine must not act on a coin flip."""
-    image, _, _ = render_paprika(25, shoulder_w=76, tip_w=74)
+def test_engine_reports_unknown_when_no_stem_is_findable():
+    """Een vrucht zonder vindbare steel moet "weet ik niet" opleveren.
+
+    Dit is de kern van het ontwerp: liever geen hoek dan een geraden hoek. Een
+    fout geplaatste paprika verlaat de cel, een eerlijk "onbekend" gaat gewoon
+    nog een rondje.
+    """
+    image, _, _ = render_paprika(25, with_stem=False)
     result = _engine().evaluate(image)
 
     assert result["status"] == "NOK"
-    assert result["primary"]["placement"] == "reorient"
-    assert result["failure_reason"] == "not_placeable_reorient"
+    assert result["primary"]["placement"] == "unknown"
+    assert result["primary"]["orientation"]["angle_deg"] is None
+
+
+def test_classical_backend_finds_the_stem_on_every_colour():
+    """Steeldetectie mag niet van vruchtkleur afhangen - op groen faalt de
+    kleurmethode per definitie en moet morfologie het overnemen."""
+    from backend.detection.paprika import classical
+
+    for name, colour in COLORS.items():
+        image, _, _ = render_paprika(40, color=colour, with_stem=True)
+        fruits = classical.find_fruit(image)
+        assert fruits, f"geen vrucht gevonden op {name}"
+        assert fruits[0].stem_end is not None, f"geen steel gevonden op {name}"
 
 
 def test_engine_reports_nok_on_empty_belt():
@@ -307,7 +341,7 @@ def test_engine_reports_nok_on_empty_belt():
 
 
 def test_engine_applies_the_plc_frame_mapping():
-    image, _, _ = render_paprika(0)
+    image, _, _ = render_paprika(0, with_stem=True)
     result = _engine(frame={"angle_offset_deg": 90.0, "angle_invert": True}).evaluate(image)
 
     # vision 0 -> invert -> 0 -> +90 -> 90

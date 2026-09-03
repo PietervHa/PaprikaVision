@@ -231,6 +231,7 @@ async function pollStatus() {
     applyMaintenanceUI();
 
     $("machineId").textContent = data.machine_id || "—";
+    refreshSource();
     $("factBackend").textContent = (data.engine && data.engine.backend) || "—";
 
     if (data.overlay) {
@@ -310,9 +311,57 @@ $("loginForm").addEventListener("submit", async (event) => {
   toast("Maintenance mode active.");
 });
 
+/* --------------------------------------------------------- bestandsbron
+ *
+ * De knoppen verschijnen alleen als de backend een map afspeelt. Bij een echte
+ * camera bestaat het endpoint niet en blijft de balk leeg, zodat er nooit een
+ * knop staat die niets doet.
+ */
+
+let IS_FOLDER = false;
+
+async function refreshSource() {
+  try {
+    const data = await (await fetch("/source")).json();
+    if (data.source !== "folder") return;
+    IS_FOLDER = true;
+    $("sourceControls").hidden = false;
+    $("factImage").textContent = `${data.index + 1}/${data.count}`;
+    $("factImage").title = data.name || "";
+    $("holdBtn").textContent = data.hold ? "Doorlopen" : "Vastzetten";
+    for (const id of ["prevBtn", "nextBtn", "holdBtn"]) {
+      $(id).disabled = !IS_MAINTENANCE;
+    }
+  } catch (err) {
+    /* geen bestandsbron */
+  }
+}
+
+async function stepSource(url) {
+  const res = await post(url);
+  if (!res.ok) return toast("Zet eerst onderhoudsmodus aan.", true);
+  const data = await res.json();
+  $("factImage").textContent = `${data.index + 1}/${data.count}`;
+  $("factImage").title = data.name || "";
+  $("holdBtn").textContent = data.hold ? "Doorlopen" : "Vastzetten";
+}
+
+$("nextBtn").addEventListener("click", () => stepSource("/source/next"));
+$("prevBtn").addEventListener("click", () => stepSource("/source/previous"));
+$("holdBtn").addEventListener("click", () => stepSource("/source/hold"));
+
+// Pijltjestoetsen: sneller dan klikken als je 160 beelden doorloopt.
+document.addEventListener("keydown", (event) => {
+  if (!IS_FOLDER || !IS_MAINTENANCE) return;
+  if (event.target.tagName === "INPUT") return;
+  if (event.key === "ArrowRight") stepSource("/source/next");
+  if (event.key === "ArrowLeft") stepSource("/source/previous");
+});
+
 /* ------------------------------------------------------------------- boot */
 
 drawDial(null, "unknown");
 applyMaintenanceUI();
+refreshSource();
 pollStatus();
 pollResult();

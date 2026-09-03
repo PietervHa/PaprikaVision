@@ -25,6 +25,11 @@
     <div id="cameraDown" class="feed-overlay" hidden>Camera disconnected — reconnecting…</div>
 
     <div class="feed-controls">
+      <span id="sourceControls" hidden>
+        <button id="prevBtn" class="ctrl" disabled>&#8592;</button>
+        <button id="holdBtn" class="ctrl" disabled>Vastzetten</button>
+        <button id="nextBtn" class="ctrl" disabled>&#8594;</button>
+      </span>
       <button id="overlayBtn" class="ctrl" disabled>Pause overlay</button>
       <button id="rotateBtn" class="ctrl" disabled>Rotate 90°</button>
       <span class="legend">
@@ -65,6 +70,7 @@
       <div class="fact"><label>Scan time</label><span id="factScan">— ms</span></div>
       <div class="fact"><label>Detector</label><span id="factBackend">—</span></div>
       <div class="fact"><label>Estimator</label><span id="factSource">—</span></div>
+      <div class="fact"><label>Beeld</label><span id="factImage">—</span></div>
     </section>
 
     <section class="counters">

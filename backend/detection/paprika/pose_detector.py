@@ -34,6 +34,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from backend.detection.paprika import classical
 from backend.detection.paprika import orientation as orient
 from backend.detection.paprika.orientation import Keypoint
 from backend.utils.logger import get_logger
@@ -68,6 +69,8 @@ class PaprikaDetector:
         belt = shape_cfg.get("belt_hue") or [96, 145]
         self._belt_hue = (int(belt[0]), int(belt[1]))
         self._value_floor = int(shape_cfg.get("value_floor", 45))
+        stem = shape_cfg.get("stem_hue") or [33, 92]
+        self._stem_hue = (int(stem[0]), int(stem[1]))
         self._min_area_px = int(shape_cfg.get("min_area_px", 4000))
         self._max_area_ratio = float(shape_cfg.get("max_area_ratio", 0.7))
 
@@ -138,58 +141,59 @@ class PaprikaDetector:
     # ----------------------------------------------------------- shape route
 
     def _detect_shape(self, frame: np.ndarray) -> list[dict]:
-        """Segment saturated blobs against a near-neutral belt.
+        """Klassieke detectie: vrucht via hue, steel via kleur of morfologie.
 
-        Deliberately colour-agnostic: it thresholds on saturation, so a red,
-        yellow, orange or green fruit all cross the same line while the belt
-        does not. No colour class is ever assigned, because colour is not a
-        selection criterion here.
+        Levert echte keypoints, niet alleen een box. Dat is het verschil tussen
+        een backend die iets vindt en een backend waar de machine op kan
+        draaien: zonder stem_end en blossom_end heeft de engine geen enkele
+        bron voor de hoek, en rapporteert hij terecht "onbekend" op elke vrucht.
+
+        Kleuronafhankelijk in de vruchtdetectie - er wordt nergens op
+        paprikakleur geselecteerd, alleen de band eruit gefilterd.
         """
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        hue, saturation, value = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-
-        # Exclude the belt by hue, not by saturation - a blue belt is highly
-        # saturated and would survive a saturation threshold. See the note in
-        # orientation.segment_fruit().
-        keep = (saturation >= self._saturation_floor) & (value >= self._value_floor)
-        low, high = self._belt_hue
-        if high > low:
-            keep &= ~((hue >= low) & (hue <= high))
-        mask = keep.astype(np.uint8) * 255
-
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-        frame_area = frame.shape[0] * frame.shape[1]
+        fruits = classical.find_fruit(
+            frame,
+            belt_hue=self._belt_hue,
+            saturation_floor=self._saturation_floor,
+            value_floor=self._value_floor,
+            stem_hue=self._stem_hue,
+            min_area=self._min_area_px,
+            max_area_ratio=self._max_area_ratio,
+            max_fruit=self.max_detections,
+        )
 
         detections: list[dict] = []
-        for label_id in range(1, count):
-            area = int(stats[label_id, cv2.CC_STAT_AREA])
-            if area < self._min_area_px or area > frame_area * self._max_area_ratio:
-                continue
+        for fruit in fruits:
+            landmarks: dict[str, Keypoint] = {}
+            if fruit.stem_end is not None and fruit.blossom_end is not None:
+                landmarks["stem_end"] = Keypoint(
+                    fruit.stem_end[0], fruit.stem_end[1], 0.85, True
+                )
+                landmarks["blossom_end"] = Keypoint(
+                    fruit.blossom_end[0],
+                    fruit.blossom_end[1],
+                    0.85,
+                    # Bij een rechtopstaande vrucht zit het bloemeinde eronder.
+                    # Als occluded markeren is precies wat de engine nodig heeft
+                    # om stem-up van stem-down te onderscheiden.
+                    not fruit.standing,
+                )
 
-            x = int(stats[label_id, cv2.CC_STAT_LEFT])
-            y = int(stats[label_id, cv2.CC_STAT_TOP])
-            w = int(stats[label_id, cv2.CC_STAT_WIDTH])
-            h = int(stats[label_id, cv2.CC_STAT_HEIGHT])
-
-            # Fill ratio stands in for a confidence score. A paprika roughly
-            # fills its bounding box; a shadow, a stray leaf or a belt seam
-            # does not. Crude, and honestly labelled as such in the result.
-            fill = area / max(1.0, float(w * h))
+            x1, y1, x2, y2 = fruit.bbox
             detections.append(
                 {
-                    "bbox": [x, y, x + w, y + h],
-                    "confidence": round(float(np.clip(fill, 0.0, 1.0)), 3),
-                    "keypoints": {},
-                    "area_px": area,
+                    "bbox": [x1, y1, x2, y2],
+                    # Geen modelscore beschikbaar, dus eerlijk vast: gevonden
+                    # is gevonden. Een verzonnen variabele score zou vertrouwen
+                    # suggereren dat nergens op gebaseerd is.
+                    "confidence": 0.80 if landmarks else 0.55,
+                    "keypoints": landmarks,
+                    "area_px": fruit.area,
+                    "stem_method": fruit.stem_method,
+                    "colour": fruit.colour,
                 }
             )
-
-        detections.sort(key=lambda d: d["area_px"], reverse=True)
-        return detections[: self.max_detections]
+        return detections
 
     # ------------------------------------------------------------ pose route
 

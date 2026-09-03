@@ -132,6 +132,25 @@ paprika:
 # CAMERA
 # =============================================================================
 camera:
+  # source: "camera" voor de live camera, "folder" om de applicatie op ruwe
+  # beelden te draaien.
+  #
+  # Gebruik "folder" om af te regelen. Op een bewegende band ziet elk frame een
+  # andere paprika, dus verandert een resultaat, dan weet je niet of dat door je
+  # instelling kwam of door de volgende vrucht. Met een vaste map is het beeld
+  # gelijk en is elk verschil dus toe te schrijven aan wat jij veranderde - dat
+  # maakt drempels afregelen en de hoekconventie vastleggen een meting in plaats
+  # van een gevoel.
+  source: "folder"
+
+  folder:
+    path: "data/raw"       # map met .bmp/.jpg/.png, wordt recursief gelezen
+    interval_s: 2.0        # seconden per beeld
+    loop: true             # opnieuw beginnen aan het eind
+    # hold: true blijft op één beeld staan tot je in de HMI doorklikt. Nodig als
+    # je naar één lastige vrucht wilt kijken in plaats van naar een reeks.
+    hold: false
+
   device_name: "DFK 22BUC03"
   index: 0
   width: 1280
