@@ -36,14 +36,16 @@ def _process_vision_result(result, trigger_time, app_state):
 
         result_dict = {**result, "cycle_time_ms": cycle_time_ms}
         app_state.update_result(result_dict)
-        app_state.increment_counter(result.get("status", "NOK"), placement)
+        orientation = primary.get("orientation") or {}
+        app_state.increment_counter(
+            result.get("status", "NOK"), placement, str(orientation.get("pose", ""))
+        )
 
         try:
             save_result(result_dict)
         except Exception as exc:
             log.error("Failed to write result: %s", exc)
 
-        orientation = primary.get("orientation") or {}
         log.info(
             "CYCLE: status=%s placement=%s angle=%s pose=%s conf=%.2f "
             "detections=%d cycle_ms=%s reason=%s",
@@ -96,7 +98,7 @@ def main():
     app_state = AppState()
     bind_app_state(app_state)
 
-    # Camera of map met ruwe beelden, zie camera.source in de config.
+    # Camera or a folder of raw images, see camera.source in the config.
     camera = build_source(app_state)
 
     web_cfg = cfg["web"]

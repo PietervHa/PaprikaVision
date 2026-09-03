@@ -87,6 +87,19 @@ paprika:
     min_area_px: 4000        # ignore blobs smaller than this
     max_area_ratio: 0.7      # a blob over 70% of frame is the belt, not fruit
 
+    # Two-stage search: first coarsely on a downscaled image for where
+    # something lies, then a precise measurement per region at full resolution.
+    # Every measurement comes from the original pixels; the downscale only
+    # decides where to look. Measured on 160 images of 900x1092: 105 ms -> 18 ms
+    # per image, with identical keypoints (0.0 px median displacement) and the
+    # same number of fruit. Set to false to verify both paths agree.
+    use_roi: true
+
+    # How much of the fruit diameter may be cut away by the frame border before
+    # the fruit counts as "incomplete". Fruit grazing the border sit around
+    # 0.16, fruit genuinely running off it around 0.69.
+    edge_cut_threshold: 0.30
+
   pose:
     model_path: "models/paprika_pose.pt"
     imgsz: 640
@@ -104,6 +117,11 @@ paprika:
   # Start strict and relax with evidence from real production logs.
   # ---------------------------------------------------------------------------
   policy:
+    # A fruit lying upside down or running off the frame gets NO angle and NO
+    # coordinates - not because the measurement failed, but because there is
+    # nothing to measure. The robot cannot pick up an upside-down paprika and
+    # turn it over, so returning a number would imply an action that does not
+    # exist. The PLC simply gets NOK.
     min_angle_confidence: 0.45   # below this -> "unknown"
     min_flip_confidence: 0.40    # axis is solid but which end is the stem is not
     # true  -> a standing fruit is a reject (topple and re-present it)
@@ -132,23 +150,23 @@ paprika:
 # CAMERA
 # =============================================================================
 camera:
-  # source: "camera" voor de live camera, "folder" om de applicatie op ruwe
-  # beelden te draaien.
+  # source: "camera" for the live camera, "folder" to run the application on
+  # raw images.
   #
-  # Gebruik "folder" om af te regelen. Op een bewegende band ziet elk frame een
-  # andere paprika, dus verandert een resultaat, dan weet je niet of dat door je
-  # instelling kwam of door de volgende vrucht. Met een vaste map is het beeld
-  # gelijk en is elk verschil dus toe te schrijven aan wat jij veranderde - dat
-  # maakt drempels afregelen en de hoekconventie vastleggen een meting in plaats
-  # van een gevoel.
+  # Use "folder" for tuning. On a moving belt every frame shows a different
+  # paprika, so if a result changes you cannot tell whether that came from your
+  # setting or from the next fruit. With a fixed folder the image is identical,
+  # so every difference is attributable to what you changed - that turns tuning
+  # thresholds and fixing the angle convention into a measurement rather than a
+  # feeling.
   source: "folder"
 
   folder:
-    path: "data/raw"       # map met .bmp/.jpg/.png, wordt recursief gelezen
-    interval_s: 2.0        # seconden per beeld
-    loop: true             # opnieuw beginnen aan het eind
-    # hold: true blijft op één beeld staan tot je in de HMI doorklikt. Nodig als
-    # je naar één lastige vrucht wilt kijken in plaats van naar een reeks.
+    path: "data/raw"       # .bmp/.jpg/.png, read recursively
+    interval_s: 2.0        # seconds per image
+    loop: true             # start over at the end
+    # hold: true stays on one image until you click on in the HMI. Needed when
+    # you want to study one difficult fruit instead of a sequence.
     hold: false
 
   device_name: "DFK 22BUC03"

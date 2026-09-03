@@ -202,45 +202,45 @@ invisible until they've cost you a training run:
 
 ---
 
-## 11. Gemeten op jouw eigen beelden (160 stuks, juli 2026)
+## 11. Measured on your own images (160 of them, July 2026)
 
-Twee dingen die het plan veranderen, gemeten in plaats van aangenomen.
+Two things that change the plan, measured rather than assumed.
 
-**De blauwe band is goud waard.** Fruit en band zijn puur op hue te scheiden:
-de band ligt strak op hue 100-125, al het fruit valt daarbuiten, en de bleke
-randstroken vallen af op saturatie. Segmentatie lukte op 160 van de 160
-beelden, 243 vruchten. Daarom zijn **alle bounding boxes gratis** - laat
-`tools/pre_annotate.py` ze genereren en teken ze niet met de hand.
+**The blue belt is worth a lot.** Fruit and belt separate on hue alone: the belt
+sits tightly at hue 100-125, all fruit falls outside it, and the pale edge
+strips drop out on saturation. Segmentation succeeded on 160 of 160 images, 243
+fruit. That is why **all bounding boxes are free** - let `tools/pre_annotate.py`
+generate them rather than drawing them by hand.
 
-**De vormschatter werkt niet op blokpaprika, en dat verandert wat het model
-moet leren.** Het idee was dat de steelkant aan de bredere schouder zit, zodat
-het silhouet kon uitwijzen welk uiteinde welk is bij een vrucht zonder steel.
-Op 87 vruchten met zichtbare steel klopt dat in 66% van de gevallen, mediane
-signaalsterkte 0,074, mediane langwerpigheid 1,33. Te rond en te symmetrisch.
-Dus staat `shape_crosscheck` uit, en wordt er in de pre-annotatie geen keypoint
-geraden op basis van vorm.
+**The shape estimator does not work on blocky paprika, and that changes what the
+model has to learn.** The idea was that the stem end sits on the wider shoulder,
+so the silhouette could settle which end is which on a fruit with no stem.
+Across 87 fruit with a visible stem that holds in 66% of cases, median signal
+strength 0.074, median elongation 1.33. Too round and too symmetric. So
+`shape_crosscheck` is off, and the pre-annotation guesses no keypoint on the
+basis of shape.
 
-Wat dat betekent voor jou: het model moet het onderscheid tussen steelkant en
-bloemkant leren van **fijne kenmerken** - het calyx-litteken, het lobbenpatroon
-aan de onderkant - en niet van de grove omtrek. Dat kan een CNN prima, en jij
-kunt het met het blote oog ook, maar het stelt wel een eis aan de data:
+What that means for you: the model has to learn the difference between stem end
+and blossom end from **fine detail** - the calyx scar, the lobe pattern
+underneath - and not from the coarse outline. A CNN handles that well, and so
+does your naked eye, but it does place a requirement on the data:
 
-> Zorg dat een steelloze vrucht altijd zó gefotografeerd is dat het
-> calyx-litteken zichtbaar is. Is dat niet zo, label het uiteinde dan met
-> vlag 1 op de plek waar je het vermoedt, en niet met vlag 2 alsof je het ziet.
-> Anders leert het model dat een raadsel een zeker antwoord heeft.
+> Make sure a stemless fruit is always photographed such that the calyx scar is
+> visible. If it is not, label that end with flag 1 where you believe it to be,
+> and not with flag 2 as though you can see it. Otherwise the model learns that
+> a guess has a certain answer.
 
-**Verdeling van de steekproef**, als richtlijn voor wat er nog bij moet:
+**Distribution of the sample**, as a guide to what still needs collecting:
 
-| | aantal | aandeel |
+| | count | share |
 |---|---|---|
-| rood | 89 | 37% |
-| groen | 95 | 39% |
-| oranje | 43 | 18% |
-| geel | 16 | 7% |
-| steel gevonden via kleur | 129 | 53% |
-| rechtopstaand | 7 | 3% |
-| geen steel zichtbaar | 19 | 8% |
+| red | 89 | 37% |
+| green | 95 | 39% |
+| orange | 43 | 18% |
+| yellow | 16 | 7% |
+| stem found via colour | 129 | 53% |
+| standing upright | 7 | 3% |
+| no stem visible | 19 | 8% |
 
-Geel is ondervertegenwoordigd en rechtopstaande vruchten zitten ver onder de
-15% uit sectie 6. Beide zijn nu nog bij te sturen, want de machine draait.
+Yellow is under-represented and standing fruit sits well below the 15% from
+section 6. Both are still correctable now, because the machine is running.

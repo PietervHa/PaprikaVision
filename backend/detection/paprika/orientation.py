@@ -68,6 +68,14 @@ POSE_LYING = "lying"
 POSE_STANDING_STEM_UP = "standing_stem_up"
 POSE_STANDING_STEM_DOWN = "standing_stem_down"
 POSE_UNKNOWN = "unknown"
+# Stem pointing down or tucked under the fruit: you are looking at the blossom
+# end. There is no in-plane angle to measure, and the robot cannot pick it up
+# and turn it over anyway, so this is an end state and not a failed measurement.
+POSE_UPSIDE_DOWN = "upside_down"
+# Fruit continues outside the frame. Says nothing about the fruit and
+# everything about the image - the centroid and angle would come from half a
+# paprika.
+POSE_INCOMPLETE = "incomplete"
 
 
 # --------------------------------------------------------------------- types

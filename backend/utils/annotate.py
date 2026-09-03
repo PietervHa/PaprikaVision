@@ -120,9 +120,19 @@ def draw_detections(
         angle = orientation.get("angle_deg")
         center = detection.get("center") or [(x1 + x2) // 2, (y1 + y2) // 2]
 
+        pose = str(orientation.get("pose", ""))
+
         if angle is not None:
             arrow_len = max(24.0, min(x2 - x1, y2 - y1) * 0.55)
             draw_orientation_arrow(frame, center, angle, arrow_len, color, 3 if is_primary else 2)
+        elif pose in ("upside_down", "incomplete"):
+            # A cross, not a circle. A circle reads as "still deciding", a
+            # cross as "nothing is coming out of this" - and the latter is the
+            # case.
+            radius = max(10, int(min(x2 - x1, y2 - y1) * 0.16))
+            cx, cy = int(center[0]), int(center[1])
+            cv2.line(frame, (cx - radius, cy - radius), (cx + radius, cy + radius), color, 3)
+            cv2.line(frame, (cx - radius, cy + radius), (cx + radius, cy - radius), color, 3)
         else:
             # No angle is a real state, not a rendering gap - mark it, so an
             # empty box never reads as "the arrow just failed to draw".

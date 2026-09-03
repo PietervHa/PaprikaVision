@@ -27,7 +27,7 @@
     <div class="feed-controls">
       <span id="sourceControls" hidden>
         <button id="prevBtn" class="ctrl" disabled>&#8592;</button>
-        <button id="holdBtn" class="ctrl" disabled>Vastzetten</button>
+        <button id="holdBtn" class="ctrl" disabled>Hold</button>
         <button id="nextBtn" class="ctrl" disabled>&#8594;</button>
       </span>
       <button id="overlayBtn" class="ctrl" disabled>Pause overlay</button>
@@ -70,13 +70,14 @@
       <div class="fact"><label>Scan time</label><span id="factScan">— ms</span></div>
       <div class="fact"><label>Detector</label><span id="factBackend">—</span></div>
       <div class="fact"><label>Estimator</label><span id="factSource">—</span></div>
-      <div class="fact"><label>Beeld</label><span id="factImage">—</span></div>
+      <div class="fact"><label>Image</label><span id="factImage">—</span></div>
     </section>
 
     <section class="counters">
       <div class="counter counter-ok"><span id="cntOk">0</span><label>Placed</label></div>
       <div class="counter counter-reorient"><span id="cntReorient">0</span><label>Reorient</label></div>
-      <div class="counter counter-reject"><span id="cntReject">0</span><label>Reject</label></div>
+      <div class="counter counter-reject"><span id="cntUpside">0</span><label>Upside down</label></div>
+      <div class="counter counter-reject"><span id="cntIncomplete">0</span><label>Incomplete</label></div>
       <div class="counter"><span id="cntTotal">0</span><label>Total</label></div>
     </section>
 

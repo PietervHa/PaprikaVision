@@ -42,6 +42,7 @@ from typing import Optional
 
 import numpy as np
 
+from backend.detection.paprika import classical
 from backend.detection.paprika import orientation as orient
 from backend.detection.paprika.orientation import Keypoint, Orientation
 from backend.detection.paprika.pose_detector import PaprikaDetector
@@ -72,17 +73,16 @@ class PaprikaEngine:
 
         self._use_shape_crosscheck = bool(block.get("shape_crosscheck", False))
 
-        # Bug die dit voorkomt: shape_crosscheck stond voor "gebruik het
-        # silhouet als TWEEDE mening naast de keypoints". Maar de klassieke
-        # backend leverde geen keypoints, dus met de cross-check uit had die
-        # helemaal geen hoekbron meer en rapporteerde hij "onbekend" op elke
-        # vrucht - detectie zonder antwoord.
+        # The bug this prevents: shape_crosscheck meant "use the silhouette as a
+        # SECOND opinion alongside the keypoints". But the classical backend
+        # produced no keypoints, so with the cross-check off it had no source of
+        # an angle at all and reported "unknown" on every fruit - detection
+        # without an answer.
         #
-        # Beide kanten zijn nu gerepareerd: de klassieke backend levert echte
-        # keypoints uit steeldetectie, en de silhouetschatter draait alleen nog
-        # waar hij daadwerkelijk iets toevoegt. Twee instellingen die elkaar
-        # stilzwijgend uitschakelden, is precies het soort koppeling dat je
-        # alleen merkt als je het draait.
+        # Both sides are fixed now: the classical backend emits real keypoints
+        # from stem detection, and the silhouette estimator only runs where it
+        # actually adds something. Two settings that silently disabled each
+        # other is exactly the kind of coupling you only notice by running it.
         self._backend = self._detector.backend
         shape_cfg = block.get("shape") if isinstance(block.get("shape"), dict) else {}
         self._saturation_floor = int(shape_cfg.get("saturation_floor", 80))
@@ -132,6 +132,9 @@ class PaprikaEngine:
         an honest "I don't know" just sends it round again. The costs are not
         symmetric, so the thresholds are not either.
         """
+        if result.pose in (orient.POSE_UPSIDE_DOWN, orient.POSE_INCOMPLETE):
+            return PLACEMENT_REJECT
+
         if result.pose in (orient.POSE_STANDING_STEM_UP, orient.POSE_STANDING_STEM_DOWN):
             # A fruit stood on its end has no meaningful in-plane rotation. The
             # machine has to topple it and look again; there is nothing to
@@ -171,11 +174,38 @@ class PaprikaEngine:
         stem: Optional[Keypoint] = landmarks.get("stem_end")
         blossom: Optional[Keypoint] = landmarks.get("blossom_end")
 
-        # Het silhouet draait alleen als tweede mening naast bestaande
-        # keypoints. Zonder keypoints zou het de enige bron zijn, en op
-        # blokpaprika haalt die maar 66% op de vraag welk uiteinde de steel is -
-        # dan is "geen hoek" een eerlijker antwoord dan een muntworp.
+        # The silhouette runs only as a second opinion alongside existing
+        # keypoints. Without keypoints it would be the only source, and on
+        # blocky paprika it manages just 66% on the question of which end holds
+        # the stem - "no angle" is a more honest answer than a coin toss.
         use_shape = self._use_shape_crosscheck and stem is not None and blossom is not None
+
+        # Unpickable is an outcome, not a failure. No angle is computed here on
+        # purpose: even a good estimate would not help the robot, because it
+        # cannot pick up an upside-down fruit and turn it over. Returning a
+        # number would imply an action that does not exist.
+        reason = str(detection.get("unpickable_reason") or "")
+        if reason:
+            pose = orient.POSE_INCOMPLETE if reason == "edge_clipped" else orient.POSE_UPSIDE_DOWN
+            unusable = Orientation(
+                source="classical",
+                pose=pose,
+                stem_present=False,
+                notes=[reason],
+            )
+            x1, y1, x2, y2 = bbox
+            return {
+                "label": ("incomplete in frame" if pose == orient.POSE_INCOMPLETE
+                          else "upside down"),
+                "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                "center": [int((x1 + x2) / 2), int((y1 + y2) / 2)],
+                "confidence": float(detection.get("confidence", 0.0)),
+                "keypoints": {},
+                "orientation": unusable.to_dict(),
+                "angle_plc": None,
+                "placement": PLACEMENT_REJECT,
+                "simulated": False,
+            }
 
         result = orient.estimate(
             frame=frame if use_shape else None,
@@ -226,7 +256,10 @@ class PaprikaEngine:
             return None
 
         placeable = [d for d in detections if d["placement"] == PLACEMENT_PLACE]
-        pool = placeable or detections
+        # An unusable fruit must never displace a usable one, not even if it is
+        # larger: what matters is what the robot can actually act on.
+        usable = [d for d in detections if d["placement"] != PLACEMENT_REJECT]
+        pool = placeable or usable or detections
 
         if self._primary_rule == "confidence":
             return max(pool, key=lambda d: d["orientation"].get("confidence", 0.0))

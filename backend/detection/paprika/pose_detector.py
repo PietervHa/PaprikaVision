@@ -71,6 +71,7 @@ class PaprikaDetector:
         self._value_floor = int(shape_cfg.get("value_floor", 45))
         stem = shape_cfg.get("stem_hue") or [33, 92]
         self._stem_hue = (int(stem[0]), int(stem[1]))
+        self._use_roi = bool(shape_cfg.get("use_roi", True))
         self._min_area_px = int(shape_cfg.get("min_area_px", 4000))
         self._max_area_ratio = float(shape_cfg.get("max_area_ratio", 0.7))
 
@@ -141,15 +142,15 @@ class PaprikaDetector:
     # ----------------------------------------------------------- shape route
 
     def _detect_shape(self, frame: np.ndarray) -> list[dict]:
-        """Klassieke detectie: vrucht via hue, steel via kleur of morfologie.
+        """Classical detection: fruit by hue, stem by colour or morphology.
 
-        Levert echte keypoints, niet alleen een box. Dat is het verschil tussen
-        een backend die iets vindt en een backend waar de machine op kan
-        draaien: zonder stem_end en blossom_end heeft de engine geen enkele
-        bron voor de hoek, en rapporteert hij terecht "onbekend" op elke vrucht.
+        Emits real keypoints, not just a box. That is the difference between a
+        backend that finds something and a backend the machine can run on:
+        without stem_end and blossom_end the engine has no source for the angle
+        at all, and rightly reports "unknown" on every fruit.
 
-        Kleuronafhankelijk in de vruchtdetectie - er wordt nergens op
-        paprikakleur geselecteerd, alleen de band eruit gefilterd.
+        Colour-independent in the fruit detection - nothing selects on paprika
+        colour, it only filters the belt out.
         """
         fruits = classical.find_fruit(
             frame,
@@ -160,6 +161,7 @@ class PaprikaDetector:
             min_area=self._min_area_px,
             max_area_ratio=self._max_area_ratio,
             max_fruit=self.max_detections,
+            use_roi=self._use_roi,
         )
 
         detections: list[dict] = []
@@ -173,9 +175,9 @@ class PaprikaDetector:
                     fruit.blossom_end[0],
                     fruit.blossom_end[1],
                     0.85,
-                    # Bij een rechtopstaande vrucht zit het bloemeinde eronder.
-                    # Als occluded markeren is precies wat de engine nodig heeft
-                    # om stem-up van stem-down te onderscheiden.
+                    # On a standing fruit the blossom end is underneath.
+                    # Marking it occluded is exactly what the engine needs to
+                    # tell stem-up from stem-down.
                     not fruit.standing,
                 )
 
@@ -183,14 +185,16 @@ class PaprikaDetector:
             detections.append(
                 {
                     "bbox": [x1, y1, x2, y2],
-                    # Geen modelscore beschikbaar, dus eerlijk vast: gevonden
-                    # is gevonden. Een verzonnen variabele score zou vertrouwen
-                    # suggereren dat nergens op gebaseerd is.
+                    # No model score available, so these are honestly fixed:
+                    # found is found. An invented variable score would imply a
+                    # confidence that nothing supports.
                     "confidence": 0.80 if landmarks else 0.55,
                     "keypoints": landmarks,
                     "area_px": fruit.area,
                     "stem_method": fruit.stem_method,
                     "colour": fruit.colour,
+                    "unpickable_reason": fruit.unpickable_reason,
+                    "edge_clipped": fruit.edge_clipped,
                 }
             )
         return detections

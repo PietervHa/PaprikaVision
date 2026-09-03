@@ -24,7 +24,8 @@ class AppState:
             "primary": None,
             "processing_time_ms": 0,
         }
-        self.counters = {"ok": 0, "nok": 0, "total": 0, "reorient": 0, "reject": 0}
+        self.counters = {"ok": 0, "nok": 0, "total": 0, "reorient": 0,
+                         "reject": 0, "upside_down": 0, "incomplete": 0}
 
         self.vision_mode = str(cfg.get("vision_mode", "paprika"))
         self.maintenance_mode = False
@@ -47,7 +48,7 @@ class AppState:
         with self.lock:
             self.latest_result = result
 
-    def increment_counter(self, status: str, placement: str = ""):
+    def increment_counter(self, status: str, placement: str = "", pose: str = ""):
         with self.lock:
             self.counters["total"] += 1
             if status == "OK":
@@ -56,10 +57,16 @@ class AppState:
                 self.counters["nok"] += 1
             if placement in ("reorient", "reject"):
                 self.counters[placement] += 1
+            # Counted separately, because they are two different problems: a
+            # lot of upside_down points at the infeed, a lot of incomplete at
+            # the camera framing or the trigger timing.
+            if pose in ("upside_down", "incomplete"):
+                self.counters[pose] += 1
 
     def reset_counters(self):
         with self.lock:
-            self.counters = {"ok": 0, "nok": 0, "total": 0, "reorient": 0, "reject": 0}
+            self.counters = {"ok": 0, "nok": 0, "total": 0, "reorient": 0,
+                         "reject": 0, "upside_down": 0, "incomplete": 0}
 
     def get_snapshot(self) -> dict:
         with self.lock:

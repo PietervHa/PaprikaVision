@@ -173,7 +173,13 @@ function renderLive(live) {
     ? "—"
     : Math.round(angle);
 
-  $("placementText").textContent = placement;
+  const poseLabels = {
+    upside_down: "upside down — cannot be picked",
+    incomplete: "incomplete in frame",
+    standing_stem_up: "standing, stem up",
+    standing_stem_down: "standing, stem down",
+  };
+  $("placementText").textContent = poseLabels[orientation.pose] || placement;
   $("poseText").textContent = orientation.pose ? orientation.pose.replace(/_/g, " ") : "—";
   $("factSource").textContent = orientation.source || "—";
 
@@ -190,7 +196,8 @@ function renderCounters(counters) {
   if (!counters) return;
   $("cntOk").textContent = counters.ok ?? 0;
   $("cntReorient").textContent = counters.reorient ?? 0;
-  $("cntReject").textContent = counters.reject ?? 0;
+  $("cntUpside").textContent = counters.upside_down ?? 0;
+  $("cntIncomplete").textContent = counters.incomplete ?? 0;
   $("cntTotal").textContent = counters.total ?? 0;
 }
 
@@ -311,11 +318,11 @@ $("loginForm").addEventListener("submit", async (event) => {
   toast("Maintenance mode active.");
 });
 
-/* --------------------------------------------------------- bestandsbron
+/* ----------------------------------------------------------- file source
  *
- * De knoppen verschijnen alleen als de backend een map afspeelt. Bij een echte
- * camera bestaat het endpoint niet en blijft de balk leeg, zodat er nooit een
- * knop staat die niets doet.
+ * The buttons only appear when the backend is playing a folder. With a real
+ * camera the endpoint does not exist and the bar stays empty, so there is never
+ * a button on screen that does nothing.
  */
 
 let IS_FOLDER = false;
@@ -328,29 +335,29 @@ async function refreshSource() {
     $("sourceControls").hidden = false;
     $("factImage").textContent = `${data.index + 1}/${data.count}`;
     $("factImage").title = data.name || "";
-    $("holdBtn").textContent = data.hold ? "Doorlopen" : "Vastzetten";
+    $("holdBtn").textContent = data.hold ? "Resume" : "Hold";
     for (const id of ["prevBtn", "nextBtn", "holdBtn"]) {
       $(id).disabled = !IS_MAINTENANCE;
     }
   } catch (err) {
-    /* geen bestandsbron */
+    /* not a file source */
   }
 }
 
 async function stepSource(url) {
   const res = await post(url);
-  if (!res.ok) return toast("Zet eerst onderhoudsmodus aan.", true);
+  if (!res.ok) return toast("Enable maintenance mode first.", true);
   const data = await res.json();
   $("factImage").textContent = `${data.index + 1}/${data.count}`;
   $("factImage").title = data.name || "";
-  $("holdBtn").textContent = data.hold ? "Doorlopen" : "Vastzetten";
+  $("holdBtn").textContent = data.hold ? "Resume" : "Hold";
 }
 
 $("nextBtn").addEventListener("click", () => stepSource("/source/next"));
 $("prevBtn").addEventListener("click", () => stepSource("/source/previous"));
 $("holdBtn").addEventListener("click", () => stepSource("/source/hold"));
 
-// Pijltjestoetsen: sneller dan klikken als je 160 beelden doorloopt.
+// Arrow keys: faster than clicking when stepping through 160 images.
 document.addEventListener("keydown", (event) => {
   if (!IS_FOLDER || !IS_MAINTENANCE) return;
   if (event.target.tagName === "INPUT") return;

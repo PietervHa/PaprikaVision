@@ -27,9 +27,9 @@ from backend.core.paprika_engine import PaprikaEngine  # noqa: E402
 from backend.detection.paprika import orientation as orient  # noqa: E402
 from backend.detection.paprika.orientation import Keypoint  # noqa: E402
 
-# Blauwe band, zoals de echte lijn. Sterk verzadigd, dus dit test meteen dat de
-# segmentatie op hue werkt en niet op saturatie - een grijze testband zou die
-# fout juist verbergen.
+# Blue belt, like the real line. Strongly saturated, so this immediately tests
+# that segmentation works on hue and not on saturation - a grey test belt would
+# hide exactly that bug.
 BELT = (200, 90, 30)
 STEM_COLOUR = (60, 150, 70)
 COLORS = {
@@ -83,8 +83,8 @@ def render_paprika(
     blossom = (cx - ca * length / 2, cy + sa * length / 2)
 
     if with_stem:
-        # Groen steeltje aan de calyx-kant, zodat de klassieke backend hier
-        # hetzelfde pad aflegt als op de echte beelden.
+        # A short green stem on the calyx side, so the classical backend takes
+        # the same path here as it does on the real images.
         tip = (int(round(stem[0] + ca * 42)), int(round(stem[1] - sa * 42)))
         cv2.line(image, (int(stem[0]), int(stem[1])), tip, STEM_COLOUR, 13, cv2.LINE_AA)
 
@@ -304,31 +304,71 @@ def test_engine_places_a_clear_fruit():
     assert orient.angular_difference(primary["angle_plc"], 25) < 5.0
 
 
-def test_engine_reports_unknown_when_no_stem_is_findable():
-    """Een vrucht zonder vindbare steel moet "weet ik niet" opleveren.
+def test_stemless_fruit_is_reported_upside_down_without_coordinates():
+    """No stem findable on a fully visible fruit means you are looking at the
+    blossom end: the fruit is lying upside down.
 
-    Dit is de kern van het ontwerp: liever geen hoek dan een geraden hoek. Een
-    fout geplaatste paprika verlaat de cel, een eerlijk "onbekend" gaat gewoon
-    nog een rondje.
+    This is an end state, not a failed measurement. The robot cannot pick it up
+    and turn it over, so returning an angle would imply an action that does not
+    exist.
     """
     image, _, _ = render_paprika(25, with_stem=False)
     result = _engine().evaluate(image)
+    primary = result["primary"]
 
     assert result["status"] == "NOK"
-    assert result["primary"]["placement"] == "unknown"
-    assert result["primary"]["orientation"]["angle_deg"] is None
+    assert primary["placement"] == "reject"
+    assert primary["orientation"]["pose"] == orient.POSE_UPSIDE_DOWN
+    assert primary["angle_plc"] is None
+    assert primary["orientation"]["angle_deg"] is None
+
+
+def test_fruit_running_off_the_frame_is_incomplete_not_upside_down():
+    """Half out of frame says something about the frame, not about the fruit -
+    it may have a perfectly good stem you simply cannot see. Conflating the two
+    would make the statistics on upside-down fruit useless."""
+    image, _, _ = render_paprika(90, with_stem=True)
+    # Remove the bottom half: the fruit now continues outside the frame. The
+    # cut then spans 43% of the diameter, well above EDGE_CUT_THRESHOLD - a
+    # fruit merely grazing the border should specifically NOT fall under it, and
+    # that is what the threshold separates.
+    cropped = image[: image.shape[0] // 2, :]
+
+    result = _engine().evaluate(cropped)
+    primary = result["primary"]
+
+    assert primary["placement"] == "reject"
+    assert primary["orientation"]["pose"] == orient.POSE_INCOMPLETE
+    assert primary["angle_plc"] is None
+
+
+def test_a_usable_fruit_is_never_displaced_by_a_rejected_one():
+    """An unusable fruit must never become primary while a usable one is
+    present, not even if it is larger - what matters is what the robot can
+    actually act on."""
+    import numpy as np
+
+    canvas = np.full((420, 900, 3), BELT, np.uint8)
+    good, _, _ = render_paprika(30, size=400, with_stem=True)
+    bad, _, _ = render_paprika(30, size=400, length=190, shoulder_w=130,
+                               tip_w=110, with_stem=False)
+    canvas[10:410, 470:870] = good
+    canvas[10:410, 10:410] = bad
+
+    result = _engine().evaluate(canvas)
+    assert result["primary"]["placement"] == "place"
 
 
 def test_classical_backend_finds_the_stem_on_every_colour():
-    """Steeldetectie mag niet van vruchtkleur afhangen - op groen faalt de
-    kleurmethode per definitie en moet morfologie het overnemen."""
+    """Stem detection must not depend on fruit colour - on green the colour
+    method fails by definition and morphology has to take over."""
     from backend.detection.paprika import classical
 
     for name, colour in COLORS.items():
         image, _, _ = render_paprika(40, color=colour, with_stem=True)
         fruits = classical.find_fruit(image)
-        assert fruits, f"geen vrucht gevonden op {name}"
-        assert fruits[0].stem_end is not None, f"geen steel gevonden op {name}"
+        assert fruits, f"no fruit found on {name}"
+        assert fruits[0].stem_end is not None, f"no stem found on {name}"
 
 
 def test_engine_reports_nok_on_empty_belt():
