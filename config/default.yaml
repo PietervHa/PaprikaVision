@@ -1,0 +1,202 @@
+# PaprikaVisionMDE configuration
+#
+# Orientation-driven paprika placement. The job of this system is to answer
+# one question per fruit: which way does the stem point, and can that answer
+# be trusted enough to place on.
+
+vision_mode: "paprika"     # "paprika" | "idle"
+machine_id: "paprika-01"
+
+# =============================================================================
+# PAPRIKA DETECTION AND ORIENTATION
+# =============================================================================
+paprika:
+
+  # ---------------------------------------------------------------------------
+  # backend: which detector finds the fruit.
+  #
+  #   "shape"      No model. Segments saturated fruit against the belt and
+  #                orients from silhouette alone. START HERE - it runs today,
+  #                before any annotation exists, so the HMI, the arrow, the
+  #                angle convention and the PLC handshake can all be
+  #                commissioned while the dataset is still being collected.
+  #                Needs a belt that is markedly less saturated than the fruit,
+  #                and cannot separate two touching paprikas.
+  #
+  #   "pose"       Trained YOLO pose model: one box plus stem_end and
+  #                blossom_end per fruit. The production backend. Handles
+  #                touching fruit and stemless fruit properly.
+  #
+  #   "simulator"  Synthetic fruit rotating at a known 30 deg/s, camera
+  #                ignored. For proving the PLC angle convention on a bench:
+  #                because the true angle is known exactly, any mismatch at the
+  #                PLC end is a convention bug, not a detection bug.
+  # ---------------------------------------------------------------------------
+  backend: "shape"
+
+  confidence: 0.45          # detector confidence floor (pose backend)
+  max_detections: 8
+
+  # Which fruit the actuator acts on when several are in frame.
+  #   "largest"    biggest silhouette - normally the one fully in view rather
+  #                than one half-entering the frame, whose angle would be
+  #                measured from a partial fruit. Default for a reason.
+  #   "confidence" highest orientation confidence
+  #   "centered"   closest to the image origin
+  primary_rule: "largest"
+
+  # Run the silhouette estimator alongside the keypoints and cross-check them.
+  #
+  # Keep this on. It is what rescues a paprika whose stem broke off in the
+  # crate: the pose model sees no stem, hedges on stem_end, and the shoulder-
+  # versus-tip asymmetry settles which end is which. It also turns a silent
+  # wrong answer into a logged disagreement.
+  #
+  # Turn it off only if the belt turns out to be as saturated as the fruit, in
+  # which case the segmentation underneath it is unreliable and its "second
+  # opinion" is noise.
+  shape_crosscheck: true
+
+  # Landmark separation below this fraction of the box diagonal means the long
+  # axis is pointing at the camera - the fruit is stood on one end and has no
+  # meaningful in-plane rotation. Raise it if standing fruit is being reported
+  # as lying at a random angle; lower it if short, blocky fruit is wrongly
+  # called standing.
+  min_span_ratio: 0.18
+
+  shape:
+    # Minimum saturation for a pixel to count as fruit. Tune against the real
+    # belt: run tools/tune_shape.py, which sweeps this and shows the mask.
+    # Too low and belt texture joins the fruit; too high and a pale yellow
+    # paprika starts dissolving at its edges.
+    saturation_floor: 60
+    min_area_px: 4000        # ignore blobs smaller than this
+    max_area_ratio: 0.7      # a blob over 70% of frame is the belt, not fruit
+
+  pose:
+    model_path: "models/paprika_pose.pt"
+    imgsz: 640
+    # Below this, a landmark is treated as "positioned but not visible" rather
+    # than discarded. That distinction is what lets the engine tell a fruit
+    # standing stem-down from one it simply failed on, so do not set it so high
+    # that occluded landmarks vanish entirely.
+    keypoint_confidence: 0.30
+
+  # ---------------------------------------------------------------------------
+  # policy: when is an angle trustworthy enough to act on?
+  #
+  # Asymmetric costs. A wrong angle places a paprika backwards and the error
+  # leaves the cell; an honest "don't know" just sends it round the loop again.
+  # Start strict and relax with evidence from real production logs.
+  # ---------------------------------------------------------------------------
+  policy:
+    min_angle_confidence: 0.45   # below this -> "unknown"
+    min_flip_confidence: 0.40    # axis is solid but which end is the stem is not
+    # true  -> a standing fruit is a reject (topple and re-present it)
+    # false -> reported as "reorient" instead
+    reject_standing: true
+
+  # ---------------------------------------------------------------------------
+  # frame: map the vision angle onto the machine's angle.
+  #
+  # Vision convention: 0 = stem points right on screen, 90 = stem points up,
+  # counter-clockwise positive. Almost certainly not what the actuator uses.
+  #
+  # Commissioning procedure:
+  #   1. backend: "simulator" - a known angle sweeps 0..360 at 30 deg/s.
+  #   2. Watch what the PLC receives against what the HMI shows.
+  #   3. If it counts the opposite way round, set angle_invert: true.
+  #   4. Add the constant difference into angle_offset_deg.
+  # Both are commissioning values, set once per machine. Never patch this in
+  # code - the next machine will need different numbers.
+  # ---------------------------------------------------------------------------
+  frame:
+    angle_offset_deg: 0.0
+    angle_invert: false
+
+# =============================================================================
+# CAMERA
+# =============================================================================
+camera:
+  device_name: "DFK 22BUC03"
+  index: 0
+  width: 1280
+  height: 1024
+  flip: -1
+
+  # Pin exposure/gain/white-balance so the driver's auto-exposure cannot drift.
+  #
+  # This matters more here than it did on the OCR machine. The shape estimator
+  # thresholds on absolute saturation, and auto white-balance wanders the
+  # saturation of every pixel in the frame - so an untouched auto setting makes
+  # detection quality change for reasons unrelated to the fruit. It also
+  # poisons the training set: images collected under drifting exposure teach
+  # the model that a paprika's appearance is inherently unstable.
+  #
+  # LOCK THESE BEFORE COLLECTING THE DATASET. Re-collecting is far more
+  # expensive than getting it right now.
+  manual_settings:
+    enabled: false
+    auto_exposure: 0.25      # backend-dependent; try 0.25, then 0, then 1, then 3
+    exposure: -6
+    gain: 0                  # prefer more exposure over more gain - gain adds noise
+    auto_white_balance: 0
+    white_balance: null
+    brightness: null
+    contrast: null
+
+# =============================================================================
+# HMI
+# =============================================================================
+hmi:
+  enable_video_feed: true
+  stream_quality: 75
+  draw_keypoints: true
+  draw_hud: true
+  # Overlay refresh rate. Independent of the 30 fps stream: the stream keeps
+  # running at full speed and redraws the most recent completed result.
+  overlay_interval_s: 0.15
+  # Blank the overlay when the newest result is older than this. Boxes that no
+  # longer line up with the fruit are worse than no boxes.
+  overlay_stale_after_s: 2.0
+
+web:
+  host: "0.0.0.0"
+  port: 5000
+
+# =============================================================================
+# PLC
+# =============================================================================
+trigger:
+  enabled: true
+  type: "tcp"
+  host: "127.0.0.1"        # 0.0.0.0 for a real PLC on the network
+  port: 5001
+  trigger_byte: "0x01"
+  response_ok: "OK\n"
+  response_nok: "NOK\n"
+  timeout_s: 5.0
+
+  # In paprika mode the PLC needs an angle, not a verdict. On a placeable
+  # fruit the response is a single semicolon-delimited line:
+  #
+  #     OK;<angle>;<x>;<y>;<pose>;<confidence>\n
+  #     OK;137.4;612;388;lying;0.91
+  #
+  # <angle> is already mapped through paprika.frame, so the PLC consumes it
+  # directly with no conversion. Anything not placeable - no fruit, standing
+  # fruit, uncertain stem end - sends response_nok instead of a number, so the
+  # PLC never has to decide whether a returned angle was trustworthy. That
+  # judgement belongs on this side, where the confidence values live.
+  response_format: "structured"   # "structured" | "okonly"
+
+# =============================================================================
+# OUTPUT
+# =============================================================================
+output:
+  result_dir: "data/results"
+
+database:
+  url: "sqlite:///data/results.db"
+
+security: {}

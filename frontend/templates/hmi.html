@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paprika Orientation — MDE</title>
+<link rel="icon" href="/static/img/mde_logo.png">
+<link rel="stylesheet" href="/static/hmi.css">
+</head>
+<body>
+
+<header class="topbar">
+  <img class="brand" src="/static/img/mde_logo.png" alt="MDE Automation">
+  <h1>Paprika orientation</h1>
+  <div class="topbar-right">
+    <span id="machineId" class="machine-id">—</span>
+    <span id="modeBadge" class="badge badge-production">Production</span>
+  </div>
+</header>
+
+<main class="workspace">
+
+  <section class="feed">
+    <img id="cameraFeed" src="/video_feed" alt="Live camera feed">
+    <div id="cameraDown" class="feed-overlay" hidden>Camera disconnected — reconnecting…</div>
+
+    <div class="feed-controls">
+      <button id="overlayBtn" class="ctrl" disabled>Pause overlay</button>
+      <button id="rotateBtn" class="ctrl" disabled>Rotate 90°</button>
+      <span class="legend">
+        <span class="dot dot-place"></span>place
+        <span class="dot dot-reorient"></span>reorient
+        <span class="dot dot-reject"></span>reject
+      </span>
+    </div>
+  </section>
+
+  <aside class="rail">
+
+    <!-- The hero: what angle, and can we act on it. -->
+    <section class="angle-card" id="angleCard">
+      <canvas id="angleDial" width="180" height="180" aria-hidden="true"></canvas>
+      <div class="angle-value">
+        <span id="angleNumber">—</span><span class="angle-unit">°</span>
+      </div>
+      <div id="placementText" class="placement">waiting for fruit</div>
+      <div id="poseText" class="pose">—</div>
+    </section>
+
+    <section class="meters">
+      <div class="meter">
+        <label>Axis confidence</label>
+        <div class="bar"><div id="barAxis" class="bar-fill"></div></div>
+        <span id="valAxis" class="meter-val">—</span>
+      </div>
+      <div class="meter">
+        <label>Stem end certainty</label>
+        <div class="bar"><div id="barFlip" class="bar-fill"></div></div>
+        <span id="valFlip" class="meter-val">—</span>
+      </div>
+    </section>
+
+    <section class="facts">
+      <div class="fact"><label>In frame</label><span id="factCount">0</span></div>
+      <div class="fact"><label>Scan time</label><span id="factScan">— ms</span></div>
+      <div class="fact"><label>Detector</label><span id="factBackend">—</span></div>
+      <div class="fact"><label>Estimator</label><span id="factSource">—</span></div>
+    </section>
+
+    <section class="counters">
+      <div class="counter counter-ok"><span id="cntOk">0</span><label>Placed</label></div>
+      <div class="counter counter-reorient"><span id="cntReorient">0</span><label>Reorient</label></div>
+      <div class="counter counter-reject"><span id="cntReject">0</span><label>Reject</label></div>
+      <div class="counter"><span id="cntTotal">0</span><label>Total</label></div>
+    </section>
+
+    <section class="actions">
+      <button id="resetBtn" class="ctrl" disabled>Reset counters</button>
+      <button id="maintBtn" class="ctrl ctrl-primary">Maintenance</button>
+    </section>
+
+  </aside>
+</main>
+
+<div id="loginDialog" class="dialog-backdrop" hidden>
+  <form class="dialog" id="loginForm">
+    <h2>Maintenance access</h2>
+    <label for="loginUser">Username</label>
+    <input id="loginUser" type="text" autocomplete="username" required>
+    <label for="loginPass">Password</label>
+    <input id="loginPass" type="password" autocomplete="current-password" required>
+    <p id="loginError" class="dialog-error" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" id="loginCancel" class="ctrl">Cancel</button>
+      <button type="submit" class="ctrl ctrl-primary">Sign in</button>
+    </div>
+  </form>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/static/hmi.js"></script>
+</body>
+</html>

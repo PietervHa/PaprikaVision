@@ -1,0 +1,304 @@
+/* PaprikaVisionMDE HMI
+ *
+ * Built for a screen bolted to a machine, read at 1-2 m by someone who is not
+ * sitting down. Consequences that drove every choice below:
+ *
+ * - Dark ground. Machine halls are bright and the screen is often at an angle;
+ *   a dark field with a few bright elements stays legible where a white page
+ *   turns into a mirror.
+ * - The angle is enormous. It is the one number that decides what the machine
+ *   does, and it has to survive being read from behind a guard.
+ * - The placement colours here are the SAME three values the overlay draws
+ *   into the video (see backend/utils/annotate.py). An operator has to be able
+ *   to connect the green box round a fruit with the green ring on the dial
+ *   without being told they mean the same thing. Change one, change both.
+ */
+
+:root {
+  --ground:        #12161c;
+  --panel:         #1b212a;
+  --panel-raised:  #232b36;
+  --line:          #313b49;
+  --text:          #e6ebf2;
+  --text-dim:      #93a1b3;
+
+  /* Must match _COLOR_PLACE / _COLOR_REORIENT / _COLOR_REJECT (BGR -> RGB). */
+  --place:    #46be5a;
+  --reorient: #ebb43c;
+  --reject:   #dc3c3c;
+
+  --radius: 6px;
+}
+
+* { box-sizing: border-box; }
+
+/* The `hidden` attribute must beat component display rules.
+ *
+ * The browser's built-in rule is only `[hidden] { display: none }`, which any
+ * author-level `display` declaration outranks. Both .dialog-backdrop and
+ * .feed-overlay set `display: grid` for centring, so without this they stay on
+ * screen permanently no matter what the JS sets `.hidden` to. */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--ground);
+  color: var(--text);
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------------------------------------------------------------- topbar */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.brand { height: 26px; width: auto; }
+.topbar h1 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.machine-id { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+.badge {
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.badge-production { background: #24303f; color: var(--text-dim); }
+.badge-maintenance { background: var(--reorient); color: #1b1300; }
+
+/* ------------------------------------------------------------- workspace */
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  gap: 16px;
+  padding: 16px;
+  height: calc(100vh - 48px);
+}
+
+.feed {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.feed img {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  object-fit: contain;
+  background: #000;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.feed-overlay {
+  position: absolute;
+  inset: 0 0 44px 0;
+  display: grid;
+  place-items: center;
+  background: rgba(10, 12, 16, 0.85);
+  color: var(--reject);
+  font-size: 1.2rem;
+  font-weight: 600;
+  border-radius: var(--radius);
+}
+
+.feed-controls { display: flex; align-items: center; gap: 10px; }
+.legend {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+}
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-left: 8px; }
+.dot-place { background: var(--place); }
+.dot-reorient { background: var(--reorient); }
+.dot-reject { background: var(--reject); }
+
+/* ------------------------------------------------------------------ rail */
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.rail > section {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
+}
+
+/* The hero. Dial and number share one card so direction and magnitude read
+ * as one fact rather than two widgets that happen to be adjacent. */
+.angle-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding-top: 18px !important;
+  border-top: 3px solid var(--line) !important;
+  transition: border-top-color 120ms linear;
+}
+.angle-card.is-place    { border-top-color: var(--place) !important; }
+.angle-card.is-reorient { border-top-color: var(--reorient) !important; }
+.angle-card.is-reject   { border-top-color: var(--reject) !important; }
+
+#angleDial { display: block; }
+
+.angle-value {
+  margin-top: -104px;
+  margin-bottom: 46px;
+  font-variant-numeric: tabular-nums;
+  font-size: 3.2rem;
+  font-weight: 300;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+.angle-unit { font-size: 1.4rem; color: var(--text-dim); margin-left: 2px; }
+
+.placement { font-size: 1.05rem; font-weight: 600; }
+.angle-card.is-place    .placement { color: var(--place); }
+.angle-card.is-reorient .placement { color: var(--reorient); }
+.angle-card.is-reject   .placement { color: var(--reject); }
+.pose { color: var(--text-dim); font-size: 0.86rem; }
+
+/* ---------------------------------------------------------------- meters */
+
+.meters { display: flex; flex-direction: column; gap: 12px; }
+.meter { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; }
+.meter label { grid-column: 1; color: var(--text-dim); font-size: 0.82rem; }
+.meter .bar {
+  grid-column: 1 / -1;
+  height: 7px;
+  background: var(--panel-raised);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.bar-fill { height: 100%; width: 0%; background: var(--place); transition: width 150ms linear; }
+.bar-fill.is-low { background: var(--reorient); }
+.bar-fill.is-bad { background: var(--reject); }
+.meter-val {
+  grid-column: 2; grid-row: 1;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.82rem;
+}
+
+/* ----------------------------------------------------------------- facts */
+
+.facts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.fact { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.fact label { color: var(--text-dim); font-size: 0.74rem; }
+.fact span {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.92rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* -------------------------------------------------------------- counters */
+
+.counters { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; text-align: center; }
+.counter { display: flex; flex-direction: column; gap: 2px; }
+.counter span { font-variant-numeric: tabular-nums; font-size: 1.35rem; font-weight: 600; }
+.counter label { color: var(--text-dim); font-size: 0.7rem; }
+.counter-ok span { color: var(--place); }
+.counter-reorient span { color: var(--reorient); }
+.counter-reject span { color: var(--reject); }
+
+/* ------------------------------------------------------------- controls */
+
+.actions { display: flex; gap: 8px; }
+.actions .ctrl { flex: 1; }
+
+.ctrl {
+  background: var(--panel-raised);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 9px 14px;
+  font-size: 0.88rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+.ctrl:hover:not(:disabled) { background: #2b3542; }
+.ctrl:disabled { opacity: 0.4; cursor: not-allowed; }
+.ctrl:focus-visible { outline: 2px solid var(--place); outline-offset: 2px; }
+.ctrl-primary { background: #2c6b8f; border-color: #37809f; }
+.ctrl-primary:hover:not(:disabled) { background: #337ba3; }
+
+/* -------------------------------------------------------------- dialogs */
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 10, 14, 0.75);
+  display: grid;
+  place-items: center;
+  z-index: 50;
+}
+.dialog {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 22px;
+  width: min(360px, 92vw);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dialog h2 { margin: 0 0 6px; font-size: 1.05rem; }
+.dialog label { color: var(--text-dim); font-size: 0.8rem; }
+.dialog input {
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 9px 11px;
+  font-size: 0.95rem;
+  font-family: inherit;
+}
+.dialog-error { color: var(--reject); font-size: 0.84rem; margin: 4px 0 0; }
+.dialog-actions { display: flex; gap: 8px; margin-top: 12px; }
+.dialog-actions .ctrl { flex: 1; }
+
+.toast {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 11px 18px;
+  z-index: 60;
+}
+.toast.is-error { border-color: var(--reject); color: var(--reject); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+
+@media (max-width: 900px) {
+  .workspace { grid-template-columns: 1fr; height: auto; }
+}

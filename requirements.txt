@@ -1,0 +1,16 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+keyboard==0.13.5
+numpy==1.26.4
+opencv-python==4.10.0.84
+Pillow==10.4.0
+PyYAML==6.0.2
+python-dotenv==1.0.1
+SQLAlchemy==2.0.51
+# Only needed for paprika.backend: "pose". The "shape" and "simulator"
+# backends run without it, which is what makes the system commissionable
+# before the model exists.
+ultralytics==8.3.40
+torch==2.5.1
+torchvision==0.20.1
+pygrabber==0.2; sys_platform == "win32"
