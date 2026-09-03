@@ -71,9 +71,10 @@ class PaprikaEngine:
         self._detector = PaprikaDetector(block)
 
         self._use_shape_crosscheck = bool(block.get("shape_crosscheck", True))
-        self._saturation_floor = int(
-            (block.get("shape") or {}).get("saturation_floor", 60)
-        )
+        shape_cfg = block.get("shape") if isinstance(block.get("shape"), dict) else {}
+        self._saturation_floor = int(shape_cfg.get("saturation_floor", 80))
+        belt = shape_cfg.get("belt_hue") or [96, 145]
+        self._belt_hue = (int(belt[0]), int(belt[1]))
         self._min_span_ratio = float(block.get("min_span_ratio", 0.18))
 
         # Placement policy thresholds.
@@ -164,6 +165,7 @@ class PaprikaEngine:
             blossom=blossom,
             use_shape=self._use_shape_crosscheck,
             saturation_floor=self._saturation_floor,
+            belt_hue=self._belt_hue,
             min_span_ratio=self._min_span_ratio,
         )
 

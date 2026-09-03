@@ -247,22 +247,34 @@ def keypoint_orientation(
 def segment_fruit(
     frame: np.ndarray,
     bbox: Optional[tuple[int, int, int, int]] = None,
-    saturation_floor: int = 0,
+    saturation_floor: int = 80,
+    belt_hue: tuple[int, int] = (96, 145),
+    value_floor: int = 45,
 ) -> Optional[np.ndarray]:
     """Isolate the fruit from the belt inside `bbox`.
 
-    Uses saturation rather than brightness. Paprikas are strongly saturated in
-    every colour they come in - red, yellow, orange, green - while conveyor
-    belting is close to neutral whatever shade it is. Thresholding on
-    brightness instead would put a yellow fruit and a white belt on the same
-    side of the line.
+    Two rules, and both are needed:
+
+    1. Exclude the belt's own hue. A blue belt is *strongly* saturated, so
+       saturation alone cannot separate it from fruit - which is why the
+       earlier saturation-only version of this function failed on the real
+       line. Hue can, and comfortably: measured across the sample set, the
+       belt sits in a tight band at hue 100-125 while every paprika colour
+       falls outside it. Blue is a deliberate choice in food handling exactly
+       because no produce is blue.
+
+    2. Require saturation and brightness. This is what removes the pale
+       structural strips at the edges of the belt, which are unsaturated and
+       would otherwise survive rule 1, along with deep shadow.
 
     Args:
         frame:            full BGR frame.
         bbox:             (x1, y1, x2, y2) to crop to. Whole frame when None.
-        saturation_floor: hard minimum saturation. 0 means pure Otsu; raise it
-                          when a dark or coloured belt drags Otsu's threshold
-                          down.
+        saturation_floor: minimum saturation for a fruit pixel.
+        belt_hue:         (low, high) OpenCV hue range of the belt, excluded.
+                          Set to (0, 0) on a neutral belt to fall back to
+                          saturation alone. Verify with tools/measure_belt.py.
+        value_floor:      minimum brightness, to drop shadow.
 
     Returns:
         A uint8 mask (0/255) the size of the crop, containing only the largest
@@ -288,11 +300,13 @@ def segment_fruit(
         return None
 
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    saturation = hsv[:, :, 1]
+    hue, saturation, value = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
 
-    _, mask = cv2.threshold(saturation, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    if saturation_floor > 0:
-        mask = cv2.bitwise_and(mask, (saturation >= saturation_floor).astype(np.uint8) * 255)
+    keep = (saturation >= saturation_floor) & (value >= value_floor)
+    low, high = belt_hue
+    if high > low:
+        keep &= ~((hue >= low) & (hue <= high))
+    mask = keep.astype(np.uint8) * 255
 
     # Close specular highlights (which read as unsaturated and punch holes in
     # the middle of a glossy fruit) before measuring anything.
@@ -539,7 +553,8 @@ def estimate(
     stem: Optional[Keypoint],
     blossom: Optional[Keypoint],
     use_shape: bool = True,
-    saturation_floor: int = 0,
+    saturation_floor: int = 80,
+    belt_hue: tuple[int, int] = (96, 145),
     min_span_ratio: float = 0.18,
 ) -> Orientation:
     """Run both estimators for one detection and fuse them.
@@ -561,7 +576,9 @@ def estimate(
 
     shape_result: Optional[Orientation] = None
     if use_shape and frame is not None:
-        mask = segment_fruit(frame, bbox, saturation_floor=saturation_floor)
+        mask = segment_fruit(
+            frame, bbox, saturation_floor=saturation_floor, belt_hue=belt_hue
+        )
         if mask is not None:
             shape_result = shape_orientation(mask)
 

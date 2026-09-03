@@ -47,15 +47,18 @@ paprika:
 
   # Run the silhouette estimator alongside the keypoints and cross-check them.
   #
-  # Keep this on. It is what rescues a paprika whose stem broke off in the
-  # crate: the pose model sees no stem, hedges on stem_end, and the shoulder-
-  # versus-tip asymmetry settles which end is which. It also turns a silent
-  # wrong answer into a logged disagreement.
+  # OFF, and measured rather than assumed. The idea was that the stem end sits
+  # on the wider shoulder, so the silhouette could settle which end is which on
+  # a fruit whose stem broke off. On 87 real fruit with a visible stem, that
+  # holds only 66% of the time, with a median signal strength of 0.074 and a
+  # median elongation of just 1.33 - a blokpaprika is too round and too
+  # symmetric for its outline to carry the answer. 66% is barely better than a
+  # coin toss, and a confident-looking wrong angle is the one failure this
+  # system exists to prevent.
   #
-  # Turn it off only if the belt turns out to be as saturated as the fruit, in
-  # which case the segmentation underneath it is unreliable and its "second
-  # opinion" is noise.
-  shape_crosscheck: true
+  # Re-measure with tools/measure_belt.py if you switch cultivar. On a long,
+  # tapered pepper this estimator would earn its place again.
+  shape_crosscheck: false
 
   # Landmark separation below this fraction of the box diagonal means the long
   # axis is pointing at the camera - the fruit is stood on one end and has no
@@ -65,11 +68,22 @@ paprika:
   min_span_ratio: 0.18
 
   shape:
-    # Minimum saturation for a pixel to count as fruit. Tune against the real
-    # belt: run tools/tune_shape.py, which sweeps this and shows the mask.
-    # Too low and belt texture joins the fruit; too high and a pale yellow
-    # paprika starts dissolving at its edges.
-    saturation_floor: 60
+    # Belt hue range, EXCLUDED from the fruit mask. Measured on the real line:
+    # the blue belt sits in a tight band at hue 100-125 (OpenCV 0-179 scale)
+    # and every paprika colour falls outside it.
+    #
+    # This is the rule that does the work. Saturation alone cannot separate a
+    # blue belt from fruit, because the belt is strongly saturated too - blue
+    # is chosen in food handling precisely because no produce is blue, and that
+    # makes hue the clean discriminator. Set to [0, 0] on a neutral grey belt
+    # to fall back to saturation only.
+    belt_hue: [96, 145]
+
+    # These two remove the pale structural strips at the belt edges, which are
+    # unsaturated and would otherwise survive the hue rule, plus deep shadow.
+    saturation_floor: 80
+    value_floor: 45
+
     min_area_px: 4000        # ignore blobs smaller than this
     max_area_ratio: 0.7      # a blob over 70% of frame is the belt, not fruit
 

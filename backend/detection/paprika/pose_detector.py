@@ -64,7 +64,10 @@ class PaprikaDetector:
         self.max_detections = int(cfg_block.get("max_detections", 8))
 
         shape_cfg = cfg_block.get("shape") if isinstance(cfg_block.get("shape"), dict) else {}
-        self._saturation_floor = int(shape_cfg.get("saturation_floor", 60))
+        self._saturation_floor = int(shape_cfg.get("saturation_floor", 80))
+        belt = shape_cfg.get("belt_hue") or [96, 145]
+        self._belt_hue = (int(belt[0]), int(belt[1]))
+        self._value_floor = int(shape_cfg.get("value_floor", 45))
         self._min_area_px = int(shape_cfg.get("min_area_px", 4000))
         self._max_area_ratio = float(shape_cfg.get("max_area_ratio", 0.7))
 
@@ -143,12 +146,16 @@ class PaprikaDetector:
         selection criterion here.
         """
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        saturation = hsv[:, :, 1]
+        hue, saturation, value = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
 
-        _, mask = cv2.threshold(saturation, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        if self._saturation_floor > 0:
-            floor_mask = (saturation >= self._saturation_floor).astype(np.uint8) * 255
-            mask = cv2.bitwise_and(mask, floor_mask)
+        # Exclude the belt by hue, not by saturation - a blue belt is highly
+        # saturated and would survive a saturation threshold. See the note in
+        # orientation.segment_fruit().
+        keep = (saturation >= self._saturation_floor) & (value >= self._value_floor)
+        low, high = self._belt_hue
+        if high > low:
+            keep &= ~((hue >= low) & (hue <= high))
+        mask = keep.astype(np.uint8) * 255
 
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)

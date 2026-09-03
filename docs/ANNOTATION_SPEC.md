@@ -199,3 +199,48 @@ invisible until they've cost you a training run:
   and standing fruit will not work
 - angle histogram gaps
 - stemless / standing proportions against the targets above
+
+---
+
+## 11. Gemeten op jouw eigen beelden (160 stuks, juli 2026)
+
+Twee dingen die het plan veranderen, gemeten in plaats van aangenomen.
+
+**De blauwe band is goud waard.** Fruit en band zijn puur op hue te scheiden:
+de band ligt strak op hue 100-125, al het fruit valt daarbuiten, en de bleke
+randstroken vallen af op saturatie. Segmentatie lukte op 160 van de 160
+beelden, 243 vruchten. Daarom zijn **alle bounding boxes gratis** - laat
+`tools/pre_annotate.py` ze genereren en teken ze niet met de hand.
+
+**De vormschatter werkt niet op blokpaprika, en dat verandert wat het model
+moet leren.** Het idee was dat de steelkant aan de bredere schouder zit, zodat
+het silhouet kon uitwijzen welk uiteinde welk is bij een vrucht zonder steel.
+Op 87 vruchten met zichtbare steel klopt dat in 66% van de gevallen, mediane
+signaalsterkte 0,074, mediane langwerpigheid 1,33. Te rond en te symmetrisch.
+Dus staat `shape_crosscheck` uit, en wordt er in de pre-annotatie geen keypoint
+geraden op basis van vorm.
+
+Wat dat betekent voor jou: het model moet het onderscheid tussen steelkant en
+bloemkant leren van **fijne kenmerken** - het calyx-litteken, het lobbenpatroon
+aan de onderkant - en niet van de grove omtrek. Dat kan een CNN prima, en jij
+kunt het met het blote oog ook, maar het stelt wel een eis aan de data:
+
+> Zorg dat een steelloze vrucht altijd zó gefotografeerd is dat het
+> calyx-litteken zichtbaar is. Is dat niet zo, label het uiteinde dan met
+> vlag 1 op de plek waar je het vermoedt, en niet met vlag 2 alsof je het ziet.
+> Anders leert het model dat een raadsel een zeker antwoord heeft.
+
+**Verdeling van de steekproef**, als richtlijn voor wat er nog bij moet:
+
+| | aantal | aandeel |
+|---|---|---|
+| rood | 89 | 37% |
+| groen | 95 | 39% |
+| oranje | 43 | 18% |
+| geel | 16 | 7% |
+| steel gevonden via kleur | 129 | 53% |
+| rechtopstaand | 7 | 3% |
+| geen steel zichtbaar | 19 | 8% |
+
+Geel is ondervertegenwoordigd en rechtopstaande vruchten zitten ver onder de
+15% uit sectie 6. Beide zijn nu nog bij te sturen, want de machine draait.
