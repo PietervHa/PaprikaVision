@@ -46,6 +46,36 @@ DEFAULT_SATURATION_FLOOR = 80
 DEFAULT_VALUE_FLOOR = 45
 DEFAULT_STEM_HUE = (33, 92)
 
+# Largest a fruit may be as a fraction of the frame. Measured on 243 real
+# paprikas: the 99th percentile is 10.1% of the frame. The old 0.7 let through
+# blobs seven times larger than any paprika, which is how a crate at the edge
+# of the frame became a "fruit" - and, because the morphology kernel scales
+# with the blob, a 630 ms one.
+DEFAULT_MAX_AREA_RATIO = 0.18
+
+# Radius, in pixels, that a fruit is scaled to before the stem morphology runs.
+#
+# Capping the kernel instead was tried and is not enough: morphological cost
+# grows with the SQUARE of the kernel, so a 121x121 opening costs 110 ms on its
+# own and nine of them per fruit put a frame at 1.4 seconds. Normalising the
+# fruit first makes the kernel small and constant - about 2 ms per opening -
+# so the cost of a frame no longer depends on how big the object in it is.
+#
+# It also removes a source of inconsistency: at a fixed kernel, a large and a
+# small paprika were being eroded by different relative amounts.
+STEM_NORMALISED_RADIUS = 60
+
+# Belt detection: the belt is the one large blue region. Below this fraction of
+# the frame it is not recognisable as a belt and the restriction is skipped
+# rather than guessed at.
+BELT_MIN_FRAME_FRACTION = 0.15
+BELT_SCALE = 0.25
+BELT_RING_DILATION = 21
+# How much of the ring around a fruit may be foreign - neither belt nor other
+# produce - before it is treated as something standing beside the belt rather
+# than product on it.
+MAX_FOREIGN_RING = 0.45
+
 GREEN_FRUIT_HUE = (33, 95)
 MIN_STEM_AREA_HUE = 150
 MIN_STEM_AREA_MORPH = 200
@@ -97,6 +127,7 @@ STEM_SELFCHECK_GAINS = (0.92, 1.08)
 # the rest of the policy: a misplaced paprika leaves the cell, an extra loop
 # does not.
 STEM_SELFCHECK_LIMIT_DEG = 6.0
+SELFCHECK_MAX_DIMENSION = 220
 
 # If the calyx sits closer to the centroid than this fraction of the fruit
 # radius, the long axis points into the camera and the fruit is standing on end.
@@ -163,6 +194,90 @@ class ClassicalFruit:
     unpickable_reason: str = ""
 
 
+def belt_mask_raw(
+    bgr: np.ndarray,
+    belt_hue: tuple[int, int] = DEFAULT_BELT_HUE,
+) -> Optional[np.ndarray]:
+    """The belt surface itself: the one large blue region, holes NOT filled.
+
+    Deliberately unfilled. Filling was tried and drops fruit at the frame edge,
+    because such a fruit is not an enclosed hole in the belt and no
+    hole-filling method will treat it as one - which would silently stop
+    reporting the 18% of product that runs off the frame, the very case the
+    incomplete counter exists for.
+
+    Returns None when no plausible belt is visible, so the caller can fall back
+    to searching the whole frame and say so. A camera knocked askew should
+    degrade loudly, not quietly stop finding product.
+    """
+    # Computed at quarter scale. The belt is by far the largest thing in the
+    # frame, so a quarter of the pixels locate it just as well, and doing it at
+    # full resolution cost 17 ms per frame - more than all the rest of the
+    # detection put together.
+    small = cv2.resize(bgr, None, fx=BELT_SCALE, fy=BELT_SCALE,
+                       interpolation=cv2.INTER_AREA)
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    hue, saturation = hsv[:, :, 0], hsv[:, :, 1]
+
+    low, high = belt_hue
+    blue = ((hue >= low) & (hue <= high) & (saturation >= 60)).astype(np.uint8) * 255
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(blue, 8)
+    if count <= 1:
+        return None
+
+    largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    small_area = small.shape[0] * small.shape[1]
+    if stats[largest, cv2.CC_STAT_AREA] < small_area * BELT_MIN_FRAME_FRACTION:
+        return None
+
+    belt = (labels == largest).astype(np.uint8) * 255
+    return cv2.resize(belt, (bgr.shape[1], bgr.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+
+def foreign_ring_fraction(
+    blob: np.ndarray,
+    belt: np.ndarray,
+    produce: np.ndarray,
+    offset: tuple[int, int],
+    frame_shape: tuple,
+) -> float:
+    """How much of the ring around a blob is neither belt nor produce.
+
+    Asks what surrounds the object rather than what it overlaps, because a
+    paprika on the belt is ringed by belt while a crate or a guard beside the
+    belt is not, whatever colour it happens to be.
+
+    Other fruit count as acceptable neighbours. Testing against belt alone was
+    tried and dropped eight real peppers: clustered green fruit are ringed by
+    each other rather than by belt, which is normal on a full belt and must not
+    read as "off the belt".
+
+    Ring pixels outside the frame are excluded rather than counted against the
+    fruit - running off the edge is a separate condition, already handled by
+    edge_cut_ratio.
+    """
+    kernel = np.ones((BELT_RING_DILATION,) * 2, np.uint8)
+    ring = cv2.subtract(cv2.dilate(blob, kernel), blob)
+
+    ys, xs = np.nonzero(ring)
+    if len(xs) == 0:
+        return 1.0
+
+    ox, oy = offset
+    gx, gy = xs + ox, ys + oy
+    inside = (gx >= 0) & (gx < frame_shape[1]) & (gy >= 0) & (gy < frame_shape[0])
+    if inside.sum() < 30:
+        # Almost the whole ring is off-frame, so there is nothing to judge by.
+        # Accepted here and left to edge_cut_ratio, which is the check that
+        # actually speaks to this situation.
+        return 0.0
+
+    gx, gy = gx[inside], gy[inside]
+    known = (belt[gy, gx] > 0) | (produce[gy, gx] > 0)
+    return float(1.0 - known.mean())
+
+
 def fruit_mask(
     bgr: np.ndarray,
     belt_hue: tuple[int, int] = DEFAULT_BELT_HUE,
@@ -226,36 +341,47 @@ def _stem_by_hue(
 def _stem_by_morphology(fruit: np.ndarray) -> tuple[Optional[np.ndarray], float]:
     """Stem as a thin protrusion, independent of colour.
 
-    Runs at three kernel scales and requires at least two of them to agree on
-    roughly the same location.
+    The fruit is first scaled to a fixed reference radius, so the morphology
+    always runs with a small kernel on a small mask. Cost is then constant
+    rather than growing with the square of the fruit size, and the amount of
+    erosion a fruit receives no longer depends on how big it happens to be.
 
-    A single scale is what made green fruit unstable. The kernel size is derived
-    from the fruit area, so a few pixels of segmentation difference between two
-    frames changes the kernel, which changes what survives the opening, which
-    changes the calyx - and the reported angle jumps. Measured on the set, that
-    put the green angle spread at 30 degrees p90 against 2-3 degrees for red.
-
-    Requiring agreement across scales turns that brittleness into an honest
-    "no stem": if the three scales disagree, the protrusion was an artefact of
-    one particular kernel and not a stem.
+    Runs at three kernel scales and requires at least two to agree. A single
+    scale is what made green fruit unstable: the kernel derives from the fruit,
+    so a few pixels of segmentation difference between frames changed what
+    survived the opening, and the reported angle jumped. Requiring agreement
+    turns that brittleness into an honest "no stem".
     """
     area = int((fruit > 0).sum())
     if area <= 0:
         return None, 0.0
 
-    radius = int(math.sqrt(area / math.pi))
+    radius = math.sqrt(area / math.pi)
+    if radius < 4:
+        return None, 0.0
+
+    # Only ever downscale. Blowing a small fruit up would invent detail that
+    # the segmentation never resolved.
+    scale = min(1.0, STEM_NORMALISED_RADIUS / radius)
+    if scale < 1.0:
+        work = cv2.resize(fruit, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+    else:
+        work = fruit
+
+    work_radius = radius * scale
 
     candidates: list[tuple[np.ndarray, np.ndarray]] = []
-    for scale in STEM_KERNEL_SCALES:
-        size = max(9, int(radius * scale)) | 1     # odd
+    for kernel_scale in STEM_KERNEL_SCALES:
+        size = max(5, int(work_radius * kernel_scale)) | 1     # odd
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
 
-        body = cv2.morphologyEx(fruit, cv2.MORPH_OPEN, kernel)
-        stem = cv2.subtract(fruit, body)
-        stem = cv2.morphologyEx(stem, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+        body = cv2.morphologyEx(work, cv2.MORPH_OPEN, kernel)
+        stem = cv2.subtract(work, body)
+        stem = cv2.morphologyEx(stem, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
+        min_area = max(20, int(MIN_STEM_AREA_MORPH * scale * scale))
         count, labels, stats, centroids = cv2.connectedComponentsWithStats(stem, 8)
-        blobs = [i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] > MIN_STEM_AREA_MORPH]
+        blobs = [i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] > min_area]
         if not blobs:
             continue
 
@@ -267,10 +393,7 @@ def _stem_by_morphology(fruit: np.ndarray) -> tuple[Optional[np.ndarray], float]
     if len(candidates) < STEM_MIN_AGREEING_SCALES:
         return None, 0.0
 
-    # Do the scales point at the same protrusion? Tolerance scales with the
-    # fruit, because "close enough" on a big paprika is not the same distance
-    # as on a small one.
-    tolerance = max(12.0, radius * STEM_AGREEMENT_RADIUS_RATIO)
+    tolerance = max(8.0, work_radius * STEM_AGREEMENT_RADIUS_RATIO)
     points = [c for _, c in candidates]
     reference = np.median(np.stack(points), axis=0)
     agreeing = [
@@ -280,24 +403,14 @@ def _stem_by_morphology(fruit: np.ndarray) -> tuple[Optional[np.ndarray], float]
     if len(agreeing) < STEM_MIN_AGREEING_SCALES:
         return None, 0.0
 
-    # Union of the agreeing masks: the scales see slightly different amounts of
-    # the same stem, and the union is a steadier outline than any single one.
     merged = agreeing[0][0].copy()
     for mask, _ in agreeing[1:]:
         merged = cv2.bitwise_or(merged, mask)
 
-    # Agreement is measured in the quantity that actually matters: the ANGLE
-    # each scale would produce, not the distance between their centroids.
-    #
-    # Those are not the same thing. Two calyx points can sit 15 px apart and,
-    # on a fruit whose calyx is near the centroid, imply directions 40 degrees
-    # apart - while the same 15 px on an elongated fruit is worth 3 degrees.
-    # Gating on centroid spread therefore passed exactly the cases that swing,
-    # which is why measuring the proxy did not fix the problem.
-    centre = _mask_centroid(fruit)
+    centre = _mask_centroid(work)
     angles = []
     for mask, _ in agreeing:
-        calyx = _calyx_from_stem(mask, centre, fruit)
+        calyx = _calyx_from_stem(mask, centre)
         angles.append(math.degrees(math.atan2(-(calyx[1] - centre[1]),
                                               calyx[0] - centre[0])) % 360.0)
 
@@ -310,6 +423,11 @@ def _stem_by_morphology(fruit: np.ndarray) -> tuple[Optional[np.ndarray], float]
     agreement = 1.0 - min(1.0, spread_deg / STEM_ANGLE_SPREAD_LIMIT_DEG)
     coverage = len(agreeing) / len(STEM_KERNEL_SCALES)
     quality = float(np.clip(0.20 + 0.65 * agreement + 0.15 * coverage, 0.0, 1.0))
+
+    if scale < 1.0:
+        merged = cv2.resize(
+            merged, (fruit.shape[1], fruit.shape[0]), interpolation=cv2.INTER_NEAREST
+        )
     return merged, quality
 
 
@@ -338,6 +456,15 @@ def _stem_selfcheck(
     was never solidly established.
     """
     angles = [baseline_deg]
+
+    # Downscaled first. This check only has to answer whether the direction
+    # moves by more than a few degrees, and at full resolution it was the
+    # single most expensive thing in a busy frame.
+    longest = max(region.shape[:2])
+    if longest > SELFCHECK_MAX_DIMENSION:
+        factor = SELFCHECK_MAX_DIMENSION / longest
+        region = cv2.resize(region, None, fx=factor, fy=factor,
+                            interpolation=cv2.INTER_AREA)
 
     for gain in STEM_SELFCHECK_GAINS:
         scaled = np.clip(region.astype(np.float32) * gain, 0, 255).astype(np.uint8)
@@ -546,10 +673,11 @@ def find_fruit(
     value_floor: int = DEFAULT_VALUE_FLOOR,
     stem_hue: tuple[int, int] = DEFAULT_STEM_HUE,
     min_area: int = 4000,
-    max_area_ratio: float = 0.7,
+    max_area_ratio: float = DEFAULT_MAX_AREA_RATIO,
     max_fruit: int = 8,
     use_roi: bool = True,
     selfcheck: bool = True,
+    belt_mask: Optional[np.ndarray] = None,
 ) -> list[ClassicalFruit]:
     """Find every fruit with, where possible, its stem and calyx.
 
@@ -566,6 +694,18 @@ def find_fruit(
 
     height, width = bgr.shape[:2]
     frame_area = height * width
+
+    if belt_mask is None:
+        belt_mask = belt_mask_raw(bgr, belt_hue)
+
+    produce_mask = None
+    if belt_mask is not None:
+        small = cv2.resize(bgr, None, fx=BELT_SCALE, fy=BELT_SCALE,
+                           interpolation=cv2.INTER_AREA)
+        small_mask, _ = fruit_mask(small, belt_hue, saturation_floor, value_floor)
+        produce_mask = cv2.resize(
+            small_mask, (width, height), interpolation=cv2.INTER_NEAREST
+        )
 
     if use_roi:
         regions = _candidate_boxes(
@@ -594,6 +734,16 @@ def find_fruit(
             blob = (labels == i).astype(np.uint8) * 255
             ys, xs = np.nonzero(blob)
             centroid = np.array([xs.mean(), ys.mean()])
+
+            # On the belt, or not product. Checked before any stem work: the
+            # expensive part of this function must never run on something that
+            # was never a candidate in the first place.
+            if belt_mask is not None:
+                foreign = foreign_ring_fraction(
+                    blob, belt_mask, produce_mask, (rx1, ry1), bgr.shape
+                )
+                if foreign > MAX_FOREIGN_RING:
+                    continue
 
             bbox = (
                 rx1 + int(stats[i, cv2.CC_STAT_LEFT]),
@@ -650,7 +800,11 @@ def find_fruit(
                         stem_mask, blob, hsv[:, :, 1]
                     )
 
-                    if selfcheck:
+                    # Only for stems found by shape, and only on fruit that
+                    # could actually be placed. Running it on a fruit already
+                    # heading for reject spends the cost on an answer nobody
+                    # uses.
+                    if selfcheck and not fruit.edge_clipped:
                         centre_local = _mask_centroid(blob)
                         calyx_local = _calyx_from_stem(stem_mask, centre_local, blob)
                         baseline = math.degrees(

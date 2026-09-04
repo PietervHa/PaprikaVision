@@ -85,7 +85,27 @@ paprika:
     value_floor: 45
 
     min_area_px: 4000        # ignore blobs smaller than this
-    max_area_ratio: 0.7      # a blob over 70% of frame is the belt, not fruit
+    # Largest a fruit may be as a fraction of the frame. Measured on 243 real
+    # paprikas the 99th percentile is 10.1%, so 0.18 has ample headroom for
+    # touching fruit and a tighter camera. The previous 0.7 let through blobs
+    # seven times larger than any paprika, which is how objects beside the belt
+    # became detections.
+    max_area_ratio: 0.18
+
+    # Restrict detection to the belt surface itself. Without this, "fruit" is
+    # defined as "not belt-coloured", which quietly makes every non-blue object
+    # in view a candidate: a machine guard, a crate, a sleeve. Measured on a
+    # belt with machine frame either side, a crate standing beside the belt was
+    # detected as a fruit without this and is correctly ignored with it.
+    #
+    # A fruit is judged by what rings it, not by what it overlaps, and other
+    # produce counts as an acceptable neighbour - clustered fruit are ringed by
+    # each other rather than by belt, which is normal on a full belt.
+    #
+    # Falls back to searching the whole frame, with a warning in the log, when
+    # no belt is recognisable - a camera knocked askew should degrade loudly
+    # rather than silently stop finding product.
+    restrict_to_belt: true
 
     # Two-stage search: first coarsely on a downscaled image for where
     # something lies, then a precise measurement per region at full resolution.

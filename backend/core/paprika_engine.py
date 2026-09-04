@@ -261,7 +261,7 @@ class PaprikaEngine:
             "simulated": bool(detection.get("simulated", False)),
             # Diagnostics, not a decision. Without these the logs cannot show
             # whether an erratic result came from the fruit colour or from the
-            # stem method, and that is exactly what you want to know when
+            # stem method, which is exactly what you want to know when
             # something is behaving inconsistently.
             "colour": detection.get("colour", ""),
             "stem_method": detection.get("stem_method", "none"),

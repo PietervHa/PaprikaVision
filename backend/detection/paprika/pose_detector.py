@@ -73,8 +73,12 @@ class PaprikaDetector:
         self._stem_hue = (int(stem[0]), int(stem[1]))
         self._use_roi = bool(shape_cfg.get("use_roi", True))
         self._selfcheck = bool(shape_cfg.get("stem_selfcheck", True))
+        self._restrict_to_belt = bool(shape_cfg.get("restrict_to_belt", True))
+        self._belt_warned = False
         self._min_area_px = int(shape_cfg.get("min_area_px", 4000))
-        self._max_area_ratio = float(shape_cfg.get("max_area_ratio", 0.7))
+        self._max_area_ratio = float(
+            shape_cfg.get("max_area_ratio", classical.DEFAULT_MAX_AREA_RATIO)
+        )
 
         pose_cfg = cfg_block.get("pose") if isinstance(cfg_block.get("pose"), dict) else {}
         self._model_path = str(pose_cfg.get("model_path", "models/paprika_pose.pt"))
@@ -153,6 +157,16 @@ class PaprikaDetector:
         Colour-independent in the fruit detection - nothing selects on paprika
         colour, it only filters the belt out.
         """
+        belt = None
+        if self._restrict_to_belt:
+            belt = classical.belt_mask_raw(frame, self._belt_hue)
+            if belt is None and not self._belt_warned:
+                log.warning(
+                    "No belt recognised in the frame - searching the whole image. "
+                    "Check the camera framing and paprika.shape.belt_hue."
+                )
+                self._belt_warned = True
+
         fruits = classical.find_fruit(
             frame,
             belt_hue=self._belt_hue,
@@ -164,6 +178,7 @@ class PaprikaDetector:
             max_fruit=self.max_detections,
             use_roi=self._use_roi,
             selfcheck=self._selfcheck,
+            belt_mask=belt,
         )
 
         detections: list[dict] = []
