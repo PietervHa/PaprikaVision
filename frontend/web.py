@@ -31,6 +31,7 @@ from backend.core import db, vision
 from backend.core.config_loader import cfg
 from backend.core.overlay_worker import OverlayWorker
 from backend.utils.annotate import draw_detections, draw_hud
+from backend.utils.belt_crop import BeltCrop, crop_frame_and_detections
 from backend.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -67,6 +68,15 @@ def create_app(camera, app_state) -> FastAPI:
     DRAW_KEYPOINTS = bool(hmi_cfg.get("draw_keypoints", True))
     DRAW_HUD = bool(hmi_cfg.get("draw_hud", True))
     OVERLAY_STALE_S = float(hmi_cfg.get("overlay_stale_after_s", 2.0))
+    CROP_TO_BELT = bool(hmi_cfg.get("crop_to_belt", True))
+
+    shape_cfg = (cfg.get("paprika") or {}).get("shape") or {}
+    belt_hue_cfg = shape_cfg.get("belt_hue") or [96, 145]
+    belt_crop = BeltCrop(
+        belt_hue=(int(belt_hue_cfg[0]), int(belt_hue_cfg[1])),
+        margin=float(hmi_cfg.get("crop_margin", 0.02)),
+        refresh_s=float(hmi_cfg.get("crop_refresh_s", 10.0)),
+    )
 
     engine = vision.get_engine()
     overlay = OverlayWorker(camera, app_state, engine)
@@ -109,6 +119,15 @@ def create_app(camera, app_state) -> FastAPI:
 
             snapshot = app_state.get_overlay(max_age_s=OVERLAY_STALE_S, now=time.time())
             detections = snapshot["detections"]
+
+            # Cropped for display only. Detection ran on the full frame and the
+            # PLC is told about full-frame coordinates; only what is drawn here
+            # is shifted, so a display choice can never move the position the
+            # machine acts on.
+            if CROP_TO_BELT:
+                frame, detections = crop_frame_and_detections(
+                    frame, detections, belt_crop.box_for(frame)
+                )
 
             frame_for_stream = frame
             if detections or DRAW_HUD:
@@ -262,6 +281,7 @@ def create_app(camera, app_state) -> FastAPI:
             return JSONResponse(status_code=403, content={"success": False})
         app_state.rotate_camera()
         rotation = app_state.get_camera_rotation()
+        belt_crop.invalidate()
         # Rotation is applied inside Camera before the engine ever sees a frame,
         # so every reported angle shifts with it. That is fine while framing the
         # camera and actively wrong if it happens after the PLC offset has been

@@ -78,6 +78,42 @@ MAX_FOREIGN_RING = 0.45
 
 GREEN_FRUIT_HUE = (33, 95)
 MIN_STEM_AREA_HUE = 150
+
+# A stem can never be this large a share of its own fruit. Measured over 129
+# fruit the ratio is 0.052 median and 0.094 at p95, so 0.20 rejects only the
+# cases where the "stem" is in fact a neighbouring green fruit that the colour
+# route swallowed - which is how a touching green pepper used to disappear into
+# the red one beside it.
+MAX_STEM_AREA_RATIO = 0.20
+
+# Splitting touching fruit.
+# Both halves must be plausible fruit in their own right: the 1st percentile of
+# real fruit area is 7161 px, so anything under that is a stem or a sliver, not
+# a second paprika. Requiring it of BOTH halves is what stops a stem being
+# split off as if it were fruit.
+SPLIT_MIN_PART_AREA = 7500
+SPLIT_MIN_SOLIDITY = 0.72
+# Distance-transform threshold as a fraction of the peak. Higher separates more
+# eagerly and risks cutting one fruit in two.
+SPLIT_DISTANCE_RATIO = 0.45
+# Hue separation, in OpenCV units, before two regions count as different fruit
+# rather than one fruit and its stem.
+SPLIT_MIN_HUE_SEPARATION = 20
+
+# Only blobs that could plausibly hold two fruit are examined at all. A single
+# compact paprika needs no splitting, and attempting it on every blob doubled
+# the cost of a frame for nothing.
+SPLIT_TRY_MIN_AREA = SPLIT_MIN_PART_AREA * 2
+SPLIT_TRY_MAX_SOLIDITY = 0.93
+# Pixels sampled for the hue clustering. Clustering every pixel of a 50,000 px
+# blob is wasted work: the hue distribution is the same either way.
+SPLIT_HUE_SAMPLE = 3000
+# Circular resultant length below which a blob's hue is considered spread out
+# enough to be worth clustering. One fruit of one colour gives a value very
+# close to 1; two colours pressed together pull it down. Costs one pass over a
+# sample of pixels, against a k-means over all of them.
+SPLIT_HUE_UNIMODAL_R = 0.985
+SPLIT_NORMALISED_RADIUS = 90
 MIN_STEM_AREA_MORPH = 200
 
 # Kernel scales for the morphological stem search, and how many must agree.
@@ -318,6 +354,170 @@ def colour_name(hue: float) -> str:
     if hue < 95:
         return "green"
     return "unknown"
+
+
+def _solidity(mask: np.ndarray) -> float:
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return 0.0
+    contour = max(contours, key=cv2.contourArea)
+    hull = cv2.convexHull(contour)
+    return float(cv2.contourArea(contour) / max(1.0, cv2.contourArea(hull)))
+
+
+def _plausible_parts(parts: list[np.ndarray]) -> Optional[list[np.ndarray]]:
+    """Accept a split only if every part could be a paprika on its own."""
+    if len(parts) < 2:
+        return None
+    for part in parts:
+        if int((part > 0).sum()) < SPLIT_MIN_PART_AREA:
+            return None
+        if _solidity(part) < SPLIT_MIN_SOLIDITY:
+            return None
+    return parts
+
+
+def split_by_distance(blob: np.ndarray) -> Optional[list[np.ndarray]]:
+    """Split touching fruit of the SAME colour, via distance transform.
+
+    Two paprikas pressed together form one connected region, and the waist
+    between them is the thinnest part of it. The distance transform makes that
+    waist explicit and watershed cuts there.
+
+    Runs on a downscaled copy for the same reason the stem morphology does: the
+    cut only has to land in the right place to within a few pixels, and both
+    the distance transform and the watershed cost scale with area.
+    """
+    area = int((blob > 0).sum())
+    if area <= 0:
+        return None
+
+    radius = math.sqrt(area / math.pi)
+    scale = min(1.0, SPLIT_NORMALISED_RADIUS / max(radius, 1.0))
+    if scale < 1.0:
+        work = cv2.resize(blob, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+    else:
+        work = blob
+
+    distance = cv2.distanceTransform(work, cv2.DIST_L2, 5)
+    peak = float(distance.max())
+    if peak <= 0:
+        return None
+
+    _, cores = cv2.threshold(distance, SPLIT_DISTANCE_RATIO * peak, 255, 0)
+    cores = cores.astype(np.uint8)
+
+    count, markers = cv2.connectedComponents(cores)
+    if count <= 2:
+        return None                                   # one core, one fruit
+
+    unknown = cv2.subtract(work, cores)
+    markers = markers + 1
+    markers[unknown == 255] = 0
+    markers = cv2.watershed(cv2.cvtColor(work, cv2.COLOR_GRAY2BGR), markers)
+
+    parts = []
+    for label in range(2, count + 1):
+        part = ((markers == label) & (work > 0)).astype(np.uint8) * 255
+        if int((part > 0).sum()) == 0:
+            continue
+        if scale < 1.0:
+            part = cv2.resize(part, (blob.shape[1], blob.shape[0]),
+                              interpolation=cv2.INTER_NEAREST)
+            part = cv2.bitwise_and(part, blob)
+        parts.append(part)
+    return _plausible_parts(parts)
+
+
+def split_by_hue(blob: np.ndarray, hue_channel: np.ndarray) -> Optional[list[np.ndarray]]:
+    """Split touching fruit of DIFFERENT colours.
+
+    Colour is a far stronger cue than shape when a green and a red pepper are
+    pressed together: the waist between them may be barely visible while the
+    hue boundary is unmistakable.
+
+    The guards matter more than the clustering. Without them this splits every
+    fruit from its own green stem, which is a 45-unit hue step and clusters
+    beautifully - and is completely wrong.
+    """
+    selected = blob > 0
+    ys, xs = np.nonzero(selected)
+    values = hue_channel[ys, xs].astype(np.float32)
+    if len(values) < 1000:
+        return None
+
+    # Clustered on the unit circle so red, which sits at both 0 and 179, is not
+    # torn into two clusters by the wrap-around.
+    def to_circle(v):
+        radians = v * 2 * np.pi / 180.0
+        return np.stack([np.cos(radians), np.sin(radians)], axis=1).astype(np.float32)
+
+    # Fitted on a sample, then applied to every pixel. The hue distribution of
+    # a 50,000 px blob is fully described by a few thousand of them.
+    if len(values) > SPLIT_HUE_SAMPLE:
+        idx = np.linspace(0, len(values) - 1, SPLIT_HUE_SAMPLE).astype(np.int64)
+        sample = to_circle(values[idx])
+    else:
+        sample = to_circle(values)
+
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)
+    _, _, centers = cv2.kmeans(sample, 2, None, criteria, 4, cv2.KMEANS_PP_CENTERS)
+
+    angles = [math.atan2(c[1], c[0]) for c in centers]
+    separation = abs(math.degrees(angles[0] - angles[1])) % 360.0
+    separation = min(separation, 360.0 - separation) / 2.0    # back to OpenCV hue
+    if separation < SPLIT_MIN_HUE_SEPARATION:
+        return None
+
+    points = to_circle(values)
+    distances = np.stack([
+        ((points - centers[c]) ** 2).sum(axis=1) for c in (0, 1)
+    ], axis=1)
+    flat = distances.argmin(axis=1)
+
+    parts = []
+    for cluster in (0, 1):
+        component = np.zeros_like(blob)
+        component[ys[flat == cluster], xs[flat == cluster]] = 255
+        component = cv2.morphologyEx(component, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8))
+
+        count, lab, stats, _ = cv2.connectedComponentsWithStats(component, 8)
+        for i in range(1, count):
+            if stats[i, cv2.CC_STAT_AREA] >= SPLIT_MIN_PART_AREA:
+                parts.append((lab == i).astype(np.uint8) * 255)
+
+    return _plausible_parts(parts)
+
+
+def split_touching(blob: np.ndarray, hue_channel: np.ndarray) -> list[np.ndarray]:
+    """Separate a blob into individual fruit, or return it unchanged.
+
+    Colour first, then shape. A colour boundary is direct evidence that two
+    different fruit are present; a thin waist is only a hint, and a single
+    lumpy paprika has waists too.
+    """
+    # Cheap gate first. A blob too small to hold two fruit, or compact enough
+    # to be one, is left alone - which is most of them.
+    area = int((blob > 0).sum())
+    if area < SPLIT_TRY_MIN_AREA:
+        return [blob]
+    if area < SPLIT_TRY_MIN_AREA * 2 and _solidity(blob) > SPLIT_TRY_MAX_SOLIDITY:
+        return [blob]
+
+    # Is there more than one colour here at all? A cheap test before an
+    # expensive one: clustering a single-coloured blob can only ever return the
+    # answer we already have.
+    ys, xs = np.nonzero(blob)
+    step = max(1, len(xs) // SPLIT_HUE_SAMPLE)
+    sampled = hue_channel[ys[::step], xs[::step]].astype(np.float32) * 2 * np.pi / 180.0
+    resultant = math.hypot(float(np.cos(sampled).mean()), float(np.sin(sampled).mean()))
+
+    parts = None
+    if resultant < SPLIT_HUE_UNIMODAL_R:
+        parts = split_by_hue(blob, hue_channel)
+    if parts is None:
+        parts = split_by_distance(blob)
+    return parts if parts else [blob]
 
 
 def _stem_by_hue(
@@ -678,16 +878,21 @@ def find_fruit(
     use_roi: bool = True,
     selfcheck: bool = True,
     belt_mask: Optional[np.ndarray] = None,
+    split: bool = True,
 ) -> list[ClassicalFruit]:
     """Find every fruit with, where possible, its stem and calyx.
 
-    Two stages: first a coarse search on a downscaled image for where something
-    lies, then a precise measurement at full resolution within each region
-    found. Every measurement therefore comes from the original pixels; the
-    downscale only decides where to look.
+    Three stages. A coarse search on a downscaled image decides where to look;
+    each region is then segmented at full resolution; and any region holding
+    more than one fruit is separated before anything is measured on it.
 
-    Set `use_roi=False` to run everything on the whole frame. Useful for
-    checking that the two paths produce the same result.
+    Splitting before measuring is not a detail. A centroid, an axis and a stem
+    taken from two merged peppers belong to neither of them, so measuring first
+    and separating afterwards cannot be repaired later.
+
+    Set `use_roi=False` to run on the whole frame, or `split=False` to leave
+    touching fruit merged - both useful for checking what each stage
+    contributes.
     """
     if bgr is None or bgr.size == 0:
         return []
@@ -715,7 +920,115 @@ def find_fruit(
         regions = [(0, 0, width, height)]
 
     fruits: list[ClassicalFruit] = []
-    seen: list[tuple[int, int, int, int]] = []
+    seen: list[tuple[int, int]] = []
+
+    def measure(blob, crop, hsv, hue_channel, origin) -> None:
+        """Measure one separated fruit and append it to the results."""
+        rx1, ry1 = origin
+        area = int((blob > 0).sum())
+        if area < min_area or area > frame_area * max_area_ratio:
+            return
+
+        ys, xs = np.nonzero(blob)
+        centroid = np.array([xs.mean(), ys.mean()])
+
+        # On the belt, or not product. Checked before any stem work: the
+        # expensive part of this function must never run on something that was
+        # never a candidate in the first place.
+        if belt_mask is not None:
+            foreign = foreign_ring_fraction(
+                blob, belt_mask, produce_mask, (rx1, ry1), bgr.shape
+            )
+            if foreign > MAX_FOREIGN_RING:
+                return
+
+        bx, by = int(xs.min()), int(ys.min())
+        bw, bh = int(xs.max() - bx + 1), int(ys.max() - by + 1)
+        bbox = (rx1 + bx, ry1 + by, rx1 + bx + bw, ry1 + by + bh)
+
+        # Overlapping ROIs can offer up the same fruit twice.
+        if any(abs(bbox[0] - a) < 20 and abs(bbox[1] - b) < 20 for a, b in seen):
+            return
+        seen.append((bbox[0], bbox[1]))
+
+        hue_value = circular_hue(hue_channel, blob)
+
+        # Crop the mask to its own box so mask and bbox share one coordinate
+        # system. The measurements below still work in crop coordinates; only
+        # what leaves this function is translated to frame coordinates.
+        fruit = ClassicalFruit(
+            bbox=bbox,
+            mask=blob[by:by + bh, bx:bx + bw].copy(),
+            area=area,
+            centroid=(float(rx1 + centroid[0]), float(ry1 + centroid[1])),
+            hue=round(hue_value, 1),
+            colour=colour_name(hue_value),
+        )
+        fruit.edge_clipped = edge_cut_ratio(fruit, bgr.shape) > EDGE_CUT_THRESHOLD
+
+        # Colour first - more accurate. Morphology as the fallback, and the
+        # only thing left on a green fruit.
+        stem_mask = None
+        if not (GREEN_FRUIT_HUE[0] < hue_value < GREEN_FRUIT_HUE[1]):
+            stem_mask = _stem_by_hue(hue_channel, blob, stem_hue)
+            if stem_mask is not None:
+                fruit.stem_method = "hue"
+                fruit.stem_quality = STEM_QUALITY_HUE
+        if stem_mask is None:
+            stem_mask, quality = _stem_by_morphology(blob)
+            if stem_mask is not None:
+                fruit.stem_method = "morphology"
+                stem_mask = _refine_stem_by_saturation(stem_mask, blob, hsv[:, :, 1])
+
+                # Only for stems found by shape, and only on fruit that could
+                # actually be placed. Running it on a fruit already heading for
+                # reject spends the cost on an answer nobody uses.
+                if selfcheck and not fruit.edge_clipped:
+                    centre_local = _mask_centroid(blob)
+                    calyx_local = _calyx_from_stem(stem_mask, centre_local, blob)
+                    baseline = math.degrees(
+                        math.atan2(-(calyx_local[1] - centre_local[1]),
+                                   calyx_local[0] - centre_local[0])
+                    ) % 360.0
+                    pad = 12
+                    region = crop[max(0, by - pad):by + bh + pad,
+                                  max(0, bx - pad):bx + bw + pad]
+                    spread = _stem_selfcheck(
+                        region, belt_hue, saturation_floor, value_floor, baseline
+                    )
+                    fruit.stem_spread_deg = round(float(spread), 1)
+                    fruit.stem_quality = float(
+                        np.clip(1.0 - spread / (STEM_SELFCHECK_LIMIT_DEG * 2.0), 0.0, 1.0)
+                    )
+                else:
+                    fruit.stem_quality = quality
+
+        if stem_mask is None:
+            # Incomplete-in-frame takes precedence: in that case "no stem found"
+            # says nothing about the fruit and everything about the image.
+            fruit.unpickable_reason = (
+                REASON_EDGE_CLIPPED if fruit.edge_clipped else REASON_NO_STEM
+            )
+            fruits.append(fruit)
+            return
+
+        if fruit.edge_clipped:
+            # A stem was found, but the fruit continues outside the frame, so
+            # the centroid - and therefore the angle - is wrong.
+            fruit.unpickable_reason = REASON_EDGE_CLIPPED
+
+        calyx = _calyx_from_stem(stem_mask, centroid, blob)
+        fruit.stem_end = (float(rx1 + calyx[0]), float(ry1 + calyx[1]))
+
+        radius = math.sqrt(area / math.pi)
+        if float(np.linalg.norm(calyx - centroid)) < radius * STANDING_RADIUS_RATIO:
+            fruit.standing = True
+            fruit.blossom_end = fruit.centroid
+        else:
+            other = _opposite_end(blob, calyx, centroid)
+            fruit.blossom_end = (float(rx1 + other[0]), float(ry1 + other[1]))
+
+        fruits.append(fruit)
 
     for rx1, ry1, rx2, ry2 in regions:
         crop = bgr[ry1:ry2, rx1:rx2]
@@ -731,126 +1044,10 @@ def find_fruit(
             if area < min_area or area > frame_area * max_area_ratio:
                 continue
 
-            blob = (labels == i).astype(np.uint8) * 255
-            ys, xs = np.nonzero(blob)
-            centroid = np.array([xs.mean(), ys.mean()])
-
-            # On the belt, or not product. Checked before any stem work: the
-            # expensive part of this function must never run on something that
-            # was never a candidate in the first place.
-            if belt_mask is not None:
-                foreign = foreign_ring_fraction(
-                    blob, belt_mask, produce_mask, (rx1, ry1), bgr.shape
-                )
-                if foreign > MAX_FOREIGN_RING:
-                    continue
-
-            bbox = (
-                rx1 + int(stats[i, cv2.CC_STAT_LEFT]),
-                ry1 + int(stats[i, cv2.CC_STAT_TOP]),
-                rx1 + int(stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH]),
-                ry1 + int(stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT]),
-            )
-
-            # Overlapping ROIs can offer up the same fruit twice.
-            if any(
-                abs(bbox[0] - s[0]) < 20 and abs(bbox[1] - s[1]) < 20 for s in seen
-            ):
-                continue
-            seen.append(bbox)
-
-            hue_value = circular_hue(hue_channel, blob)
-
-            # Crop the mask to its own box so mask and bbox share one coordinate
-            # system. The measurements below still work in crop coordinates;
-            # only what leaves this function is translated to frame coordinates.
-            bx = int(stats[i, cv2.CC_STAT_LEFT])
-            by = int(stats[i, cv2.CC_STAT_TOP])
-            bw = int(stats[i, cv2.CC_STAT_WIDTH])
-            bh = int(stats[i, cv2.CC_STAT_HEIGHT])
-
-            fruit = ClassicalFruit(
-                bbox=bbox,
-                mask=blob[by:by + bh, bx:bx + bw].copy(),
-                area=area,
-                centroid=(float(rx1 + centroid[0]), float(ry1 + centroid[1])),
-                hue=round(hue_value, 1),
-                colour=colour_name(hue_value),
-            )
-
-            fruit.edge_clipped = (
-                edge_cut_ratio(fruit, bgr.shape) > EDGE_CUT_THRESHOLD
-            )
-
-            # Colour first - more accurate. Morphology as the fallback, and the
-            # only thing left on a green fruit.
-            stem_mask = None
-            if not (GREEN_FRUIT_HUE[0] < hue_value < GREEN_FRUIT_HUE[1]):
-                stem_mask = _stem_by_hue(hue_channel, blob, stem_hue)
-                if stem_mask is not None:
-                    fruit.stem_method = "hue"
-                    # Colour separation is direct evidence, not an inference
-                    # from shape, and it measured stable to 0.3 degrees.
-                    fruit.stem_quality = STEM_QUALITY_HUE
-            if stem_mask is None:
-                stem_mask, quality = _stem_by_morphology(blob)
-                if stem_mask is not None:
-                    fruit.stem_method = "morphology"
-                    stem_mask = _refine_stem_by_saturation(
-                        stem_mask, blob, hsv[:, :, 1]
-                    )
-
-                    # Only for stems found by shape, and only on fruit that
-                    # could actually be placed. Running it on a fruit already
-                    # heading for reject spends the cost on an answer nobody
-                    # uses.
-                    if selfcheck and not fruit.edge_clipped:
-                        centre_local = _mask_centroid(blob)
-                        calyx_local = _calyx_from_stem(stem_mask, centre_local, blob)
-                        baseline = math.degrees(
-                            math.atan2(-(calyx_local[1] - centre_local[1]),
-                                       calyx_local[0] - centre_local[0])
-                        ) % 360.0
-                        pad = 12
-                        ry1 = max(0, by - pad); rx1 = max(0, bx - pad)
-                        region = crop[ry1:by + bh + pad, rx1:bx + bw + pad]
-                        spread = _stem_selfcheck(
-                            region, belt_hue, saturation_floor, value_floor, baseline
-                        )
-                        fruit.stem_spread_deg = round(float(spread), 1)
-                        fruit.stem_quality = float(
-                            np.clip(1.0 - spread / (STEM_SELFCHECK_LIMIT_DEG * 2.0), 0.0, 1.0)
-                        )
-                    else:
-                        fruit.stem_quality = quality
-
-            if stem_mask is None:
-                # Incomplete-in-frame takes precedence: in that case "no stem
-                # found" says nothing about the fruit and everything about the
-                # image.
-                fruit.unpickable_reason = (
-                    REASON_EDGE_CLIPPED if fruit.edge_clipped else REASON_NO_STEM
-                )
-                fruits.append(fruit)
-                continue
-
-            if fruit.edge_clipped:
-                # A stem was found, but the fruit continues outside the frame,
-                # so the centroid - and therefore the angle - is wrong.
-                fruit.unpickable_reason = REASON_EDGE_CLIPPED
-
-            calyx = _calyx_from_stem(stem_mask, centroid, blob)
-            fruit.stem_end = (float(rx1 + calyx[0]), float(ry1 + calyx[1]))
-
-            radius = math.sqrt(area / math.pi)
-            if float(np.linalg.norm(calyx - centroid)) < radius * STANDING_RADIUS_RATIO:
-                fruit.standing = True
-                fruit.blossom_end = fruit.centroid
-            else:
-                other = _opposite_end(blob, calyx, centroid)
-                fruit.blossom_end = (float(rx1 + other[0]), float(ry1 + other[1]))
-
-            fruits.append(fruit)
+            component = (labels == i).astype(np.uint8) * 255
+            parts = split_touching(component, hue_channel) if split else [component]
+            for part in parts:
+                measure(part, crop, hsv, hue_channel, (rx1, ry1))
 
     fruits.sort(key=lambda f: f.area, reverse=True)
     return fruits[:max_fruit]

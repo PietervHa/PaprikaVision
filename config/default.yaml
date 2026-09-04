@@ -254,6 +254,17 @@ hmi:
   # longer line up with the fruit are worse than no boxes.
   overlay_stale_after_s: 2.0
 
+  # Show only the belt in the HMI instead of the whole sensor. The camera also
+  # sees the pale side strips and whatever is behind the line, none of which is
+  # inspectable, and all of which is transmitted thirty times a second and then
+  # scaled down in the browser - so the part the operator needs ends up small.
+  #
+  # Display only. Detection keeps running on the full frame and the PLC is told
+  # about full-frame coordinates; only what is drawn is shifted.
+  crop_to_belt: true
+  crop_margin: 0.02        # keep a little around the belt for overhanging fruit
+  crop_refresh_s: 10.0     # a belt does not move, but a camera can be nudged
+
 web:
   host: "0.0.0.0"
   port: 5000
