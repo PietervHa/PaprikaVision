@@ -72,6 +72,7 @@ class PaprikaDetector:
         stem = shape_cfg.get("stem_hue") or [33, 92]
         self._stem_hue = (int(stem[0]), int(stem[1]))
         self._use_roi = bool(shape_cfg.get("use_roi", True))
+        self._selfcheck = bool(shape_cfg.get("stem_selfcheck", True))
         self._min_area_px = int(shape_cfg.get("min_area_px", 4000))
         self._max_area_ratio = float(shape_cfg.get("max_area_ratio", 0.7))
 
@@ -162,19 +163,25 @@ class PaprikaDetector:
             max_area_ratio=self._max_area_ratio,
             max_fruit=self.max_detections,
             use_roi=self._use_roi,
+            selfcheck=self._selfcheck,
         )
 
         detections: list[dict] = []
         for fruit in fruits:
             landmarks: dict[str, Keypoint] = {}
             if fruit.stem_end is not None and fruit.blossom_end is not None:
+                # The keypoint confidence IS the stem localisation quality.
+                # Feeding a fixed 0.85 here was what let a loosely pinned stem
+                # on a green fruit reach the PLC looking as certain as a stem
+                # separated cleanly by colour.
+                quality = float(fruit.stem_quality or 0.5)
                 landmarks["stem_end"] = Keypoint(
-                    fruit.stem_end[0], fruit.stem_end[1], 0.85, True
+                    fruit.stem_end[0], fruit.stem_end[1], quality, True
                 )
                 landmarks["blossom_end"] = Keypoint(
                     fruit.blossom_end[0],
                     fruit.blossom_end[1],
-                    0.85,
+                    quality,
                     # On a standing fruit the blossom end is underneath.
                     # Marking it occluded is exactly what the engine needs to
                     # tell stem-up from stem-down.
@@ -188,10 +195,12 @@ class PaprikaDetector:
                     # No model score available, so these are honestly fixed:
                     # found is found. An invented variable score would imply a
                     # confidence that nothing supports.
-                    "confidence": 0.80 if landmarks else 0.55,
+                    "confidence": round(0.55 + 0.35 * float(fruit.stem_quality or 0.0), 3),
                     "keypoints": landmarks,
                     "area_px": fruit.area,
                     "stem_method": fruit.stem_method,
+                    "stem_quality": round(float(fruit.stem_quality or 0.0), 3),
+                    "stem_spread_deg": float(fruit.stem_spread_deg or 0.0),
                     "colour": fruit.colour,
                     "unpickable_reason": fruit.unpickable_reason,
                     "edge_clipped": fruit.edge_clipped,

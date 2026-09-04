@@ -95,6 +95,9 @@ class PaprikaEngine:
         self._min_angle_confidence = float(policy.get("min_angle_confidence", 0.45))
         self._min_flip_confidence = float(policy.get("min_flip_confidence", 0.40))
         self._reject_standing = bool(policy.get("reject_standing", True))
+        # Maximum measured movement of the stem direction under a lighting
+        # change before the fruit is sent round again instead of placed.
+        self._max_stem_spread_deg = float(policy.get("max_stem_spread_deg", 6.0))
 
         # Machine frame mapping. Changing how the vision zero lines up with the
         # actuator zero must never require a code change - it is a commissioning
@@ -205,6 +208,8 @@ class PaprikaEngine:
                 "angle_plc": None,
                 "placement": PLACEMENT_REJECT,
                 "simulated": False,
+                "colour": detection.get("colour", ""),
+                "stem_method": detection.get("stem_method", "none"),
             }
 
         result = orient.estimate(
@@ -219,6 +224,17 @@ class PaprikaEngine:
         )
 
         placement = self._placement_for(result)
+
+        # A stem direction that moves with the light is not a direction. This
+        # is measured per fruit by re-running the detection at two other gains,
+        # so it reflects this fruit under this light rather than an average
+        # taken over the dataset.
+        spread = float(detection.get("stem_spread_deg", 0.0) or 0.0)
+        if placement == PLACEMENT_PLACE and spread > self._max_stem_spread_deg:
+            placement = PLACEMENT_REORIENT
+            result.notes.append(f"stem_unstable={spread:.0f}deg")
+            result.flip_confidence = min(result.flip_confidence, 0.3)
+
         x1, y1, x2, y2 = bbox
 
         return {
@@ -243,6 +259,14 @@ class PaprikaEngine:
             ),
             "placement": placement,
             "simulated": bool(detection.get("simulated", False)),
+            # Diagnostics, not a decision. Without these the logs cannot show
+            # whether an erratic result came from the fruit colour or from the
+            # stem method, and that is exactly what you want to know when
+            # something is behaving inconsistently.
+            "colour": detection.get("colour", ""),
+            "stem_method": detection.get("stem_method", "none"),
+            "stem_quality": detection.get("stem_quality", 0.0),
+            "stem_spread_deg": round(float(detection.get("stem_spread_deg", 0.0) or 0.0), 1),
         }
 
     def _pick_primary(self, detections: list[dict]) -> Optional[dict]:

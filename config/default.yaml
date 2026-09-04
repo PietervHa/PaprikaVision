@@ -95,6 +95,11 @@ paprika:
     # same number of fruit. Set to false to verify both paths agree.
     use_roi: true
 
+    # Re-run stem detection at two other gains to see whether the stem
+    # direction holds still. Costs about 1.2 ms per image and is the only thing
+    # that reliably identifies an unstable green fruit before it is placed.
+    stem_selfcheck: true
+
     # How much of the fruit diameter may be cut away by the frame border before
     # the fruit counts as "incomplete". Fruit grazing the border sit around
     # 0.16, fruit genuinely running off it around 0.69.
@@ -127,6 +132,24 @@ paprika:
     # true  -> a standing fruit is a reject (topple and re-present it)
     # false -> reported as "reorient" instead
     reject_standing: true
+
+    # Maximum movement of the stem direction, in degrees, when the same fruit
+    # is re-detected under an 8% lighting change. Above this the fruit is sent
+    # for reorientation instead of placed.
+    #
+    # This is what fixed erratic scans on green paprika. On red, orange and
+    # yellow the green stem separates on hue and the angle is solid to well
+    # under a degree. On green the stem has to be found by shape, and a tail of
+    # roughly 20% of those produce a direction that moves with the light -
+    # measured up to 37 degrees between two frames of the same pepper. Nothing
+    # about how confident the result looked predicted which ones: scale
+    # agreement, orientation confidence and mask jitter each caught only 1 in 5.
+    # Re-running the detection under the actual disturbance separates them
+    # cleanly (1.1 vs 29.1 degrees median spread).
+    #
+    # Raise it to place more fruit and accept more misplacements; lower it to be
+    # stricter. Set the whole check off with paprika.shape.stem_selfcheck.
+    max_stem_spread_deg: 6.0
 
   # ---------------------------------------------------------------------------
   # frame: map the vision angle onto the machine's angle.

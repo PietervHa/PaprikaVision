@@ -342,6 +342,55 @@ def test_fruit_running_off_the_frame_is_incomplete_not_upside_down():
     assert primary["angle_plc"] is None
 
 
+def test_unstable_stem_is_sent_for_reorientation_not_placed():
+    """A stem direction that moves when the light changes is not a direction.
+
+    This is the check that fixed erratic scans on green fruit, where the stem
+    has to be found by shape rather than by colour. It is gated on a measured
+    quantity, so the test drives it through the measurement: a fruit reported
+    with a large stem spread must never come back as placeable.
+    """
+    image, _, _ = render_paprika(40, with_stem=True)
+    engine = _engine()
+
+    result = engine.evaluate(image)
+    assert result["primary"]["placement"] == "place"
+
+    # Same detection, but reported as having an unstable stem direction.
+    detection = {
+        "bbox": result["primary"]["bbox"],
+        "confidence": 0.9,
+        "keypoints": {},
+        "stem_spread_deg": 30.0,
+        "stem_method": "morphology",
+        "colour": "green",
+    }
+    from backend.detection.paprika.orientation import Keypoint
+
+    kp = result["primary"]["keypoints"]
+    if kp:
+        detection["keypoints"] = {
+            name: Keypoint(v["x"], v["y"], v["confidence"], v["visible"])
+            for name, v in kp.items()
+        }
+    evaluated = engine._evaluate_one(image, detection)
+
+    assert evaluated["placement"] == "reorient"
+    assert any("stem_unstable" in n for n in evaluated["orientation"]["notes"])
+
+
+def test_stem_found_by_colour_is_treated_as_stable():
+    """The colour route measured stable to well under a degree, so it must not
+    be dragged down by the shape route's gate."""
+    image, _, _ = render_paprika(40, with_stem=True)
+    result = _engine().evaluate(image)
+    primary = result["primary"]
+
+    assert primary["stem_method"] == "hue"
+    assert primary["stem_spread_deg"] == 0.0
+    assert primary["placement"] == "place"
+
+
 def test_a_usable_fruit_is_never_displaced_by_a_rejected_one():
     """An unusable fruit must never become primary while a usable one is
     present, not even if it is larger - what matters is what the robot can
