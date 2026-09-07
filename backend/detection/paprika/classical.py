@@ -86,13 +86,51 @@ MIN_STEM_AREA_HUE = 150
 # the red one beside it.
 MAX_STEM_AREA_RATIO = 0.20
 
+# How far a pixel's hue must sit from the FRUIT'S OWN hue to count as stem.
+# Measured against the fruit rather than against a fixed green band, because
+# stems are not all the same green: a dried olive stub sits near hue 33, right
+# on the edge of any band wide enough to be useful, and a band widened to catch
+# it starts swallowing orange fruit instead.
+STEM_HUE_DELTA = 18.0
+STEM_MIN_SATURATION = 55
+STEM_MIN_VALUE = 30
+
+# Size limits expressed against the BELT WIDTH rather than the frame.
+#
+# Frame-relative limits were a mistake, and an expensive one: they encode how
+# the camera happens to be framed, so a closer lens silently rejected every
+# fruit as "too large" and the detector returned nothing at all. Measured on the
+# original set a paprika spans 0.33 of the belt width (p99 0.456), and that
+# ratio is a property of the product and the machine - it does not change when
+# the lens does.
+MIN_FRUIT_AREA_PER_BELT2 = 0.008
+MAX_FRUIT_AREA_PER_BELT2 = 0.22
+# A blob up to this is a candidate for SPLITTING, not a rejection. Two touching
+# peppers measured 0.26 on the images where detection was failing entirely.
+MAX_BLOB_AREA_PER_BELT2 = 0.60
+MIN_PART_AREA_PER_BELT2 = 0.015
+MIN_STEM_AREA_PER_BELT2 = 0.00015
+# When the belt runs off both sides of the frame its measured width is only a
+# lower bound - the real belt is wider - so every size expressed against it is
+# understated. Rather than reject fruit for being "too large" on a tightly
+# framed camera, the upper limits are relaxed by this factor.
+BELT_CUTOFF_SLACK = 3.0
+
 # Splitting touching fruit.
 # Both halves must be plausible fruit in their own right: the 1st percentile of
 # real fruit area is 7161 px, so anything under that is a stem or a sliver, not
 # a second paprika. Requiring it of BOTH halves is what stops a stem being
 # split off as if it were fruit.
 SPLIT_MIN_PART_AREA = 7500
-SPLIT_MIN_SOLIDITY = 0.72
+# A split part is inherently less solid than a whole fruit: it has a concave cut
+# edge where its neighbour was. Requiring whole-fruit solidity of it meant a
+# single ragged part vetoed the entire split, leaving two peppers merged as one.
+#
+# Size is what actually keeps stems from being split off as fruit: a stem is
+# about 5% of its fruit, which is 0.004 of belt width squared, far below the
+# 0.015 a part must reach. Solidity only has to exclude genuinely stringy
+# fragments.
+SPLIT_MIN_SOLIDITY = 0.55
 # Distance-transform threshold as a fraction of the peak. Higher separates more
 # eagerly and risks cutting one fruit in two.
 SPLIT_DISTANCE_RATIO = 0.45
@@ -230,6 +268,37 @@ class ClassicalFruit:
     unpickable_reason: str = ""
 
 
+def belt_is_cut_off(belt: Optional[np.ndarray], frame_shape: tuple, margin: int = 4) -> bool:
+    """True when the belt reaches both side edges of the frame.
+
+    Then its measured width is a lower bound, not the width, and any limit
+    derived from it is understated by an unknown amount.
+    """
+    if belt is None:
+        return False
+    columns = np.nonzero(belt.any(axis=0))[0]
+    if len(columns) == 0:
+        return False
+    edge = frame_shape[1] * BELT_SCALE - 1 - margin
+    return bool(columns.min() <= margin and columns.max() >= edge)
+
+
+def belt_width(belt: Optional[np.ndarray]) -> Optional[float]:
+    """Width of the belt in pixels, used as the scale reference.
+
+    How large a paprika should be is expressed against this instead of against
+    the frame, so one configuration works whatever the camera resolution or how
+    close the lens sits.
+    """
+    if belt is None:
+        return None
+    ys, xs = np.nonzero(belt)
+    if len(xs) < 100:
+        return None
+    # Divided back out because the mask is held at BELT_SCALE.
+    return float(xs.max() - xs.min() + 1) / BELT_SCALE
+
+
 def belt_mask_raw(
     bgr: np.ndarray,
     belt_hue: tuple[int, int] = DEFAULT_BELT_HUE,
@@ -267,8 +336,9 @@ def belt_mask_raw(
     if stats[largest, cv2.CC_STAT_AREA] < small_area * BELT_MIN_FRAME_FRACTION:
         return None
 
-    belt = (labels == largest).astype(np.uint8) * 255
-    return cv2.resize(belt, (bgr.shape[1], bgr.shape[0]), interpolation=cv2.INTER_NEAREST)
+    # Returned at BELT_SCALE, not resized up. Callers scale their coordinates
+    # instead, which is one multiply against a full-frame array allocation.
+    return (labels == largest).astype(np.uint8) * 255
 
 
 def foreign_ring_fraction(
@@ -300,10 +370,16 @@ def foreign_ring_fraction(
     if len(xs) == 0:
         return 1.0
 
+    # The belt and produce masks are kept at BELT_SCALE rather than resized up
+    # to the full frame. Scaling two full-frame masks per call cost more than
+    # every lookup they served, and the ring test only needs to know which side
+    # of a boundary a pixel is on - a quarter-resolution answer to that is the
+    # same answer.
     ox, oy = offset
-    gx, gy = xs + ox, ys + oy
-    inside = (gx >= 0) & (gx < frame_shape[1]) & (gy >= 0) & (gy < frame_shape[0])
-    if inside.sum() < 30:
+    gx = ((xs + ox) * BELT_SCALE).astype(np.int32)
+    gy = ((ys + oy) * BELT_SCALE).astype(np.int32)
+    inside = (gx >= 0) & (gx < belt.shape[1]) & (gy >= 0) & (gy < belt.shape[0])
+    if inside.sum() < 20:
         # Almost the whole ring is off-frame, so there is nothing to judge by.
         # Accepted here and left to edge_cut_ratio, which is the check that
         # actually speaks to this situation.
@@ -365,19 +441,23 @@ def _solidity(mask: np.ndarray) -> float:
     return float(cv2.contourArea(contour) / max(1.0, cv2.contourArea(hull)))
 
 
-def _plausible_parts(parts: list[np.ndarray]) -> Optional[list[np.ndarray]]:
+def _plausible_parts(
+    parts: list[np.ndarray], min_part_area: float = SPLIT_MIN_PART_AREA
+) -> Optional[list[np.ndarray]]:
     """Accept a split only if every part could be a paprika on its own."""
     if len(parts) < 2:
         return None
     for part in parts:
-        if int((part > 0).sum()) < SPLIT_MIN_PART_AREA:
+        if int((part > 0).sum()) < min_part_area:
             return None
         if _solidity(part) < SPLIT_MIN_SOLIDITY:
             return None
     return parts
 
 
-def split_by_distance(blob: np.ndarray) -> Optional[list[np.ndarray]]:
+def split_by_distance(
+    blob: np.ndarray, min_part_area: float = SPLIT_MIN_PART_AREA
+) -> Optional[list[np.ndarray]]:
     """Split touching fruit of the SAME colour, via distance transform.
 
     Two paprikas pressed together form one connected region, and the waist
@@ -426,10 +506,13 @@ def split_by_distance(blob: np.ndarray) -> Optional[list[np.ndarray]]:
                               interpolation=cv2.INTER_NEAREST)
             part = cv2.bitwise_and(part, blob)
         parts.append(part)
-    return _plausible_parts(parts)
+    return _plausible_parts(parts, min_part_area)
 
 
-def split_by_hue(blob: np.ndarray, hue_channel: np.ndarray) -> Optional[list[np.ndarray]]:
+def split_by_hue(
+    blob: np.ndarray, hue_channel: np.ndarray,
+    min_part_area: float = SPLIT_MIN_PART_AREA,
+) -> Optional[list[np.ndarray]]:
     """Split touching fruit of DIFFERENT colours.
 
     Colour is a far stronger cue than shape when a green and a red pepper are
@@ -483,13 +566,16 @@ def split_by_hue(blob: np.ndarray, hue_channel: np.ndarray) -> Optional[list[np.
 
         count, lab, stats, _ = cv2.connectedComponentsWithStats(component, 8)
         for i in range(1, count):
-            if stats[i, cv2.CC_STAT_AREA] >= SPLIT_MIN_PART_AREA:
+            if stats[i, cv2.CC_STAT_AREA] >= min_part_area:
                 parts.append((lab == i).astype(np.uint8) * 255)
 
-    return _plausible_parts(parts)
+    return _plausible_parts(parts, min_part_area)
 
 
-def split_touching(blob: np.ndarray, hue_channel: np.ndarray) -> list[np.ndarray]:
+def split_touching(
+    blob: np.ndarray, hue_channel: np.ndarray,
+    min_part_area: float = SPLIT_MIN_PART_AREA,
+) -> list[np.ndarray]:
     """Separate a blob into individual fruit, or return it unchanged.
 
     Colour first, then shape. A colour boundary is direct evidence that two
@@ -499,9 +585,9 @@ def split_touching(blob: np.ndarray, hue_channel: np.ndarray) -> list[np.ndarray
     # Cheap gate first. A blob too small to hold two fruit, or compact enough
     # to be one, is left alone - which is most of them.
     area = int((blob > 0).sum())
-    if area < SPLIT_TRY_MIN_AREA:
+    if area < min_part_area * 2:
         return [blob]
-    if area < SPLIT_TRY_MIN_AREA * 2 and _solidity(blob) > SPLIT_TRY_MAX_SOLIDITY:
+    if area < min_part_area * 4 and _solidity(blob) > SPLIT_TRY_MAX_SOLIDITY:
         return [blob]
 
     # Is there more than one colour here at all? A cheap test before an
@@ -514,28 +600,70 @@ def split_touching(blob: np.ndarray, hue_channel: np.ndarray) -> list[np.ndarray
 
     parts = None
     if resultant < SPLIT_HUE_UNIMODAL_R:
-        parts = split_by_hue(blob, hue_channel)
+        parts = split_by_hue(blob, hue_channel, min_part_area)
     if parts is None:
-        parts = split_by_distance(blob)
+        parts = split_by_distance(blob, min_part_area)
     return parts if parts else [blob]
 
 
 def _stem_by_hue(
-    hue_channel: np.ndarray, fruit: np.ndarray, stem_hue: tuple[int, int]
+    hsv: np.ndarray, fruit: np.ndarray, min_area: float = MIN_STEM_AREA_HUE
 ) -> Optional[np.ndarray]:
-    """Green stem on a non-green fruit."""
-    low, high = stem_hue
-    green = (
-        (hue_channel >= low) & (hue_channel <= high) & (fruit > 0)
-    ).astype(np.uint8) * 255
-    green = cv2.morphologyEx(green, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    """Find the stem as the part of the fruit whose colour is not the fruit's.
 
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(green, 8)
-    blobs = [i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] > MIN_STEM_AREA_HUE]
+    Measured against the fruit's own hue, not against a fixed green band. On a
+    red pepper with a short dried stub, a fixed band returned 25 pixels and
+    found nothing; measured against the fruit's own colour it returns 408 and
+    finds the stub. Where both approaches work they agree to 1 px median, 4 px
+    at p90.
+
+    On a green fruit the stem shares the flesh's hue, so nothing is returned
+    and the caller falls back to morphology. That is the correct outcome here,
+    not a failure.
+
+    Works inside the fruit's bounding box rather than over the whole crop. The
+    difference is not cosmetic: computing the hue delta across every pixel of
+    the region for every fruit in it doubled the time per frame.
+    """
+    ys, xs = np.nonzero(fruit)
+    if len(xs) == 0:
+        return None
+    x1, x2 = int(xs.min()), int(xs.max()) + 1
+    y1, y2 = int(ys.min()), int(ys.max()) + 1
+
+    window = fruit[y1:y2, x1:x2]
+    hue = hsv[y1:y2, x1:x2, 0]
+    saturation = hsv[y1:y2, x1:x2, 1]
+    value = hsv[y1:y2, x1:x2, 2]
+
+    fruit_hue = circular_hue(hue, window)
+    delta = np.abs(hue.astype(np.float32) - fruit_hue)
+    delta = np.minimum(delta, 180.0 - delta)          # hue is circular
+
+    candidate = (
+        (delta >= STEM_HUE_DELTA)
+        & (window > 0)
+        & (saturation >= STEM_MIN_SATURATION)
+        & (value >= STEM_MIN_VALUE)
+    ).astype(np.uint8) * 255
+    candidate = cv2.morphologyEx(candidate, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, 8)
+    blobs = [i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] > min_area]
     if not blobs:
         return None
+
     largest = max(blobs, key=lambda i: stats[i, cv2.CC_STAT_AREA])
-    return (labels == largest).astype(np.uint8) * 255
+
+    # A stem that is a fifth of its own fruit is not a stem. Without this the
+    # colour route absorbs a touching green pepper into the red one beside it,
+    # and the green one is never reported at all.
+    if stats[largest, cv2.CC_STAT_AREA] > int((fruit > 0).sum()) * MAX_STEM_AREA_RATIO:
+        return None
+
+    stem = np.zeros_like(fruit)
+    stem[y1:y2, x1:x2] = (labels == largest).astype(np.uint8) * 255
+    return stem
 
 
 def _stem_by_morphology(fruit: np.ndarray) -> tuple[Optional[np.ndarray], float]:
@@ -789,8 +917,8 @@ def _candidate_boxes(
     belt_hue: tuple[int, int],
     saturation_floor: int,
     value_floor: int,
-    min_area: int,
-    max_area_ratio: float,
+    area_min: float,
+    area_max: float,
 ) -> list[tuple[int, int, int, int]]:
     """Find candidate regions on a downscaled image.
 
@@ -803,12 +931,13 @@ def _candidate_boxes(
                        interpolation=cv2.INTER_AREA)
     mask, _ = fruit_mask(small, belt_hue, saturation_floor, value_floor)
 
-    frame_area = small.shape[0] * small.shape[1]
     # Half as strict as the real threshold. This step only decides WHERE to
-    # look; fruit found to be too small are still rejected during the
+    # look; blobs of the wrong size are still rejected during the
     # full-resolution measurement. A missed candidate is final, a superfluous
     # candidate costs a few milliseconds.
-    scaled_min = max(20, int(min_area * CANDIDATE_SCALE * CANDIDATE_SCALE * 0.5))
+    factor = CANDIDATE_SCALE * CANDIDATE_SCALE
+    scaled_min = max(20, int(area_min * factor * 0.5))
+    scaled_max = area_max * factor * 1.5
 
     count, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     height, width = bgr.shape[:2]
@@ -816,7 +945,7 @@ def _candidate_boxes(
     boxes = []
     for i in range(1, count):
         area = int(stats[i, cv2.CC_STAT_AREA])
-        if area < scaled_min or area > frame_area * max_area_ratio:
+        if area < scaled_min or area > scaled_max:
             continue
 
         x = stats[i, cv2.CC_STAT_LEFT] / CANDIDATE_SCALE
@@ -903,18 +1032,36 @@ def find_fruit(
     if belt_mask is None:
         belt_mask = belt_mask_raw(bgr, belt_hue)
 
+    # Size limits come from the belt when one is visible, and only fall back to
+    # frame fractions when it is not. Belt-relative limits describe the product
+    # and the machine; frame-relative ones describe the lens.
+    width_belt = belt_width(belt_mask)
+    if width_belt is not None:
+        # Upper limits only. The lower limits stay put: a belt that is cut off
+        # is wider than measured, so the smallest plausible fruit can only grow,
+        # never shrink.
+        slack = BELT_CUTOFF_SLACK if belt_is_cut_off(belt_mask, bgr.shape) else 1.0
+        area_min = max(600.0, MIN_FRUIT_AREA_PER_BELT2 * width_belt ** 2)
+        area_max_fruit = MAX_FRUIT_AREA_PER_BELT2 * width_belt ** 2 * slack
+        area_max_blob = MAX_BLOB_AREA_PER_BELT2 * width_belt ** 2 * slack
+        part_min = MIN_PART_AREA_PER_BELT2 * width_belt ** 2
+        stem_area_min = max(60.0, MIN_STEM_AREA_PER_BELT2 * width_belt ** 2)
+    else:
+        area_min = float(min_area)
+        area_max_fruit = frame_area * max_area_ratio
+        area_max_blob = frame_area * max_area_ratio
+        part_min = float(SPLIT_MIN_PART_AREA)
+        stem_area_min = float(MIN_STEM_AREA_HUE)
+
     produce_mask = None
     if belt_mask is not None:
         small = cv2.resize(bgr, None, fx=BELT_SCALE, fy=BELT_SCALE,
                            interpolation=cv2.INTER_AREA)
-        small_mask, _ = fruit_mask(small, belt_hue, saturation_floor, value_floor)
-        produce_mask = cv2.resize(
-            small_mask, (width, height), interpolation=cv2.INTER_NEAREST
-        )
+        produce_mask, _ = fruit_mask(small, belt_hue, saturation_floor, value_floor)
 
     if use_roi:
         regions = _candidate_boxes(
-            bgr, belt_hue, saturation_floor, value_floor, min_area, max_area_ratio
+            bgr, belt_hue, saturation_floor, value_floor, area_min, area_max_blob
         )
     else:
         regions = [(0, 0, width, height)]
@@ -926,7 +1073,7 @@ def find_fruit(
         """Measure one separated fruit and append it to the results."""
         rx1, ry1 = origin
         area = int((blob > 0).sum())
-        if area < min_area or area > frame_area * max_area_ratio:
+        if area < area_min or area > area_max_fruit:
             return
 
         ys, xs = np.nonzero(blob)
@@ -970,7 +1117,7 @@ def find_fruit(
         # only thing left on a green fruit.
         stem_mask = None
         if not (GREEN_FRUIT_HUE[0] < hue_value < GREEN_FRUIT_HUE[1]):
-            stem_mask = _stem_by_hue(hue_channel, blob, stem_hue)
+            stem_mask = _stem_by_hue(hsv, blob, stem_area_min)
             if stem_mask is not None:
                 fruit.stem_method = "hue"
                 fruit.stem_quality = STEM_QUALITY_HUE
@@ -1041,13 +1188,32 @@ def find_fruit(
         count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
         for i in range(1, count):
             area = int(stats[i, cv2.CC_STAT_AREA])
-            if area < min_area or area > frame_area * max_area_ratio:
+            # A blob too large for one fruit is a candidate for SPLITTING, not
+            # a rejection. Rejecting outright is what made two touching peppers
+            # vanish entirely instead of becoming two detections.
+            if area < area_min or area > area_max_blob:
                 continue
 
-            component = (labels == i).astype(np.uint8) * 255
-            parts = split_touching(component, hue_channel) if split else [component]
+            # Cut the component down to its own box before anything else
+            # touches it. Every step below scans whole arrays, and scanning the
+            # whole region for a fruit occupying a tenth of it was the single
+            # largest cost in a busy frame.
+            bx = int(stats[i, cv2.CC_STAT_LEFT])
+            by = int(stats[i, cv2.CC_STAT_TOP])
+            bw = int(stats[i, cv2.CC_STAT_WIDTH])
+            bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+
+            component = ((labels[by:by + bh, bx:bx + bw] == i).astype(np.uint8) * 255)
+            sub_crop = crop[by:by + bh, bx:bx + bw]
+            sub_hsv = hsv[by:by + bh, bx:bx + bw]
+            sub_hue = sub_hsv[:, :, 0]
+
+            parts = (
+                split_touching(component, sub_hue, part_min)
+                if split else [component]
+            )
             for part in parts:
-                measure(part, crop, hsv, hue_channel, (rx1, ry1))
+                measure(part, sub_crop, sub_hsv, sub_hue, (rx1 + bx, ry1 + by))
 
     fruits.sort(key=lambda f: f.area, reverse=True)
     return fruits[:max_fruit]

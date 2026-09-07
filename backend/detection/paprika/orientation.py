@@ -72,6 +72,15 @@ POSE_UNKNOWN = "unknown"
 # end. There is no in-plane angle to measure, and the robot cannot pick it up
 # and turn it over anyway, so this is an end state and not a failed measurement.
 POSE_UPSIDE_DOWN = "upside_down"
+# No stem could be found on a fruit that is fully in frame. Deliberately NOT
+# POSE_UPSIDE_DOWN: that pose asserts something about the fruit (it is lying
+# blossom-up), while this one only reports what the backend managed to see.
+# Both are rejected, and identically - the distinction buys nothing at the
+# actuator and everything in the log. A climbing upside_down count points at
+# the infeed, a climbing stem_not_found count points at the stem detector, the
+# lighting or the cultivar, and those are fixed by different people on
+# different days. Conflated, the number tells you only that something is wrong.
+POSE_STEM_NOT_FOUND = "stem_not_found"
 # Fruit continues outside the frame. Says nothing about the fruit and
 # everything about the image - the centroid and angle would come from half a
 # paprika.
@@ -281,7 +290,11 @@ def segment_fruit(
         saturation_floor: minimum saturation for a fruit pixel.
         belt_hue:         (low, high) OpenCV hue range of the belt, excluded.
                           Set to (0, 0) on a neutral belt to fall back to
-                          saturation alone. Verify with tools/measure_belt.py.
+                          saturation alone. Verify on your own line by
+                          sampling belt pixels in HSV (OpenCV hue is 0-179,
+                          not 0-359); tools/tune_shape.py writes
+                          fruit | mask | overlay montages that show directly
+                          whether the belt is being excluded.
         value_floor:      minimum brightness, to drop shadow.
 
     Returns:
@@ -374,8 +387,9 @@ def shape_orientation(
                          rather than inventing an axis out of noise.
 
     Returns:
-        An Orientation whose coordinates are relative to the mask, so the
-        caller must add the crop offset back on. `flip_confidence` is the
+        An Orientation carrying angles only - no positions - so nothing here
+        needs the crop offset added back on: a direction measured inside the
+        crop is the same direction in the full frame. `flip_confidence` is the
         number to watch: it is how strongly the two ends actually differed,
         and it collapses toward zero on a symmetric fruit.
     """

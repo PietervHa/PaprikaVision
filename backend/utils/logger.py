@@ -16,7 +16,7 @@ class _SuppressResultPollFilter(logging.Filter):
     _pattern = re.compile(r'"?(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) /result(?:\?|\s)')
 
     def filter(self, record):
-        if record.name not in ("werkzeug", "uvicorn.access"):
+        if record.name != "uvicorn.access":
             return True
         return not bool(self._pattern.search(record.getMessage()))
 

@@ -37,12 +37,12 @@ whole frame, and keeps the TCP response a single fixed-shape line.
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Optional
 
 import numpy as np
 
-from backend.detection.paprika import classical
 from backend.detection.paprika import orientation as orient
 from backend.detection.paprika.orientation import Keypoint, Orientation
 from backend.detection.paprika.pose_detector import PaprikaDetector
@@ -54,6 +54,28 @@ PLACEMENT_PLACE = "place"
 PLACEMENT_REORIENT = "reorient"
 PLACEMENT_REJECT = "reject"
 PLACEMENT_UNKNOWN = "unknown"
+
+# Why the detector said a fruit is unusable, mapped onto the pose it is
+# recorded as. The keys are the REASON_* values in
+# backend/detection/paprika/classical.py; they are wire tokens that also end up
+# in stored results, so they are matched here as literals exactly as the rest
+# of this file does.
+#
+# Anything unrecognised falls through to POSE_UPSIDE_DOWN, which is the
+# conservative default: it rejects, and a new reason showing up as "upside
+# down" in the log is at least visible rather than silently placeable.
+_UNPICKABLE_POSES = {
+    "edge_clipped": orient.POSE_INCOMPLETE,
+    "no_stem": orient.POSE_STEM_NOT_FOUND,
+}
+
+# Kept beside the mapping above so a new reason cannot end up with a pose but
+# no label, which is how an HMI ends up showing a raw enum to an operator.
+_UNPICKABLE_LABELS = {
+    orient.POSE_INCOMPLETE: "incomplete in frame",
+    orient.POSE_STEM_NOT_FOUND: "stem not found",
+    orient.POSE_UPSIDE_DOWN: "upside down",
+}
 
 
 def _round_or_none(value, digits: int = 2):
@@ -135,7 +157,11 @@ class PaprikaEngine:
         an honest "I don't know" just sends it round again. The costs are not
         symmetric, so the thresholds are not either.
         """
-        if result.pose in (orient.POSE_UPSIDE_DOWN, orient.POSE_INCOMPLETE):
+        if result.pose in (
+            orient.POSE_UPSIDE_DOWN,
+            orient.POSE_STEM_NOT_FOUND,
+            orient.POSE_INCOMPLETE,
+        ):
             return PLACEMENT_REJECT
 
         if result.pose in (orient.POSE_STANDING_STEM_UP, orient.POSE_STANDING_STEM_DOWN):
@@ -189,7 +215,7 @@ class PaprikaEngine:
         # number would imply an action that does not exist.
         reason = str(detection.get("unpickable_reason") or "")
         if reason:
-            pose = orient.POSE_INCOMPLETE if reason == "edge_clipped" else orient.POSE_UPSIDE_DOWN
+            pose = _UNPICKABLE_POSES.get(reason, orient.POSE_UPSIDE_DOWN)
             unusable = Orientation(
                 source="classical",
                 pose=pose,
@@ -198,14 +224,17 @@ class PaprikaEngine:
             )
             x1, y1, x2, y2 = bbox
             return {
-                "label": ("incomplete in frame" if pose == orient.POSE_INCOMPLETE
-                          else "upside down"),
+                "label": _UNPICKABLE_LABELS.get(pose, "unusable"),
                 "bbox": [int(x1), int(y1), int(x2), int(y2)],
                 "center": [int((x1 + x2) / 2), int((y1 + y2) / 2)],
                 "confidence": float(detection.get("confidence", 0.0)),
                 "keypoints": {},
                 "orientation": unusable.to_dict(),
                 "angle_plc": None,
+                # Unchanged by the stem_not_found split, and deliberately so:
+                # this is a reporting distinction, not a policy one. A fruit
+                # whose stem cannot be found is exactly as unplaceable as it
+                # was before it had its own name.
                 "placement": PLACEMENT_REJECT,
                 "simulated": False,
                 "colour": detection.get("colour", ""),
@@ -269,12 +298,23 @@ class PaprikaEngine:
             "stem_spread_deg": round(float(detection.get("stem_spread_deg", 0.0) or 0.0), 1),
         }
 
-    def _pick_primary(self, detections: list[dict]) -> Optional[dict]:
+    def _pick_primary(
+        self,
+        detections: list[dict],
+        frame_width: int = 0,
+        frame_height: int = 0,
+    ) -> Optional[dict]:
         """Choose the fruit the actuator acts on.
 
         "largest" is the default because on a belt the biggest silhouette is
         normally the one fully in view, rather than one half-entering frame
         whose angle is being measured from a partial fruit.
+
+        Args:
+            frame_width, frame_height: size of the frame the detections came
+                from. Only the "centered" rule needs them, but it needs them
+                absolutely: centre-ness is meaningless without knowing where
+                the centre is.
         """
         if not detections:
             return None
@@ -287,8 +327,27 @@ class PaprikaEngine:
 
         if self._primary_rule == "confidence":
             return max(pool, key=lambda d: d["orientation"].get("confidence", 0.0))
+
         if self._primary_rule == "centered":
-            return min(pool, key=lambda d: abs(d["center"][0]) + abs(d["center"][1]))
+            # Distance from the middle of the frame. This used to measure from
+            # the image ORIGIN, which made "centered" quietly mean "nearest the
+            # top-left corner" - i.e. it preferred the fruit just entering the
+            # frame, the exact opposite of the intent, and on a belt running
+            # left to right it picked a different fruit every time. A rule that
+            # names the centre has to be told where the centre is, which is why
+            # the frame size is now a parameter rather than an assumption.
+            if frame_width > 0 and frame_height > 0:
+                cx, cy = frame_width / 2.0, frame_height / 2.0
+                return min(
+                    pool,
+                    key=lambda d: math.hypot(d["center"][0] - cx, d["center"][1] - cy),
+                )
+            # No frame size means the centre is unknowable. Fall through to
+            # "largest" rather than silently reinstating the origin bug.
+            log.warning(
+                "primary_rule='centered' needs the frame size; falling back to 'largest'"
+            )
+
         return max(
             pool,
             key=lambda d: (d["bbox"][2] - d["bbox"][0]) * (d["bbox"][3] - d["bbox"][1]),
@@ -336,7 +395,8 @@ class PaprikaEngine:
             }
 
         detections = [self._evaluate_one(frame, d) for d in raw]
-        primary = self._pick_primary(detections)
+        frame_height, frame_width = frame.shape[:2]
+        primary = self._pick_primary(detections, frame_width, frame_height)
 
         processing_time_ms = round((time.perf_counter() - start) * 1000, 2)
 

@@ -42,7 +42,7 @@ paprika:
   #                than one half-entering the frame, whose angle would be
   #                measured from a partial fruit. Default for a reason.
   #   "confidence" highest orientation confidence
-  #   "centered"   closest to the image origin
+  #   "centered"   closest to the middle of the frame
   primary_rule: "largest"
 
   # Run the silhouette estimator alongside the keypoints and cross-check them.
@@ -56,8 +56,9 @@ paprika:
   # coin toss, and a confident-looking wrong angle is the one failure this
   # system exists to prevent.
   #
-  # Re-measure with tools/measure_belt.py if you switch cultivar. On a long,
-  # tapered pepper this estimator would earn its place again.
+  # Re-measure with tools/tune_shape.py if you switch cultivar - it reports the
+  # mean flip confidence per saturation floor, which is this decision in one
+  # number. On a long, tapered pepper this estimator would earn its place again.
   shape_crosscheck: false
 
   # Landmark separation below this fraction of the box diagonal means the long
@@ -85,11 +86,18 @@ paprika:
     value_floor: 45
 
     min_area_px: 4000        # ignore blobs smaller than this
-    # Largest a fruit may be as a fraction of the frame. Measured on 243 real
-    # paprikas the 99th percentile is 10.1%, so 0.18 has ample headroom for
-    # touching fruit and a tighter camera. The previous 0.7 let through blobs
-    # seven times larger than any paprika, which is how objects beside the belt
-    # became detections.
+    # Fallback only, used when no belt is visible. Size limits are normally
+    # taken from the BELT WIDTH, not from the frame.
+    #
+    # Frame-relative limits encode how the camera happens to be framed. Moving
+    # the lens closer made fruit occupy 20-30% of the frame instead of 5%, and
+    # every one of them was then rejected as "too large" - the detector
+    # returned nothing at all. Measured against the belt a paprika spans 0.33 of
+    # its width (p99 0.456), and that ratio belongs to the product and the
+    # machine, not to the lens.
+    #
+    # See MIN/MAX_FRUIT_AREA_PER_BELT2 in classical.py for the belt-relative
+    # limits that are actually used.
     max_area_ratio: 0.18
 
     # Restrict detection to the belt surface itself. Without this, "fruit" is
@@ -264,6 +272,16 @@ hmi:
   crop_to_belt: true
   crop_margin: 0.02        # keep a little around the belt for overhanging fruit
   crop_refresh_s: 10.0     # a belt does not move, but a camera can be nudged
+
+  # Flip confidence below which the overlay draws "stem end uncertain".
+  #
+  # null means "follow paprika.policy.min_flip_confidence", which is what you
+  # want: the chip then marks exactly the fruit the machine will send round
+  # again, so what the operator sees and what the machine does cannot drift
+  # apart when somebody tunes the policy. Set a number here only to warn
+  # deliberately earlier than the machine acts - for instance while watching
+  # how close a batch is running to the threshold.
+  flip_warning_below: null
 
 web:
   host: "0.0.0.0"

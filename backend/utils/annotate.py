@@ -94,8 +94,20 @@ def draw_detections(
     primary_center: Optional[list] = None,
     show_keypoints: bool = True,
     font_scale: float = 0.5,
+    flip_warning_below: float = 0.40,
 ) -> np.ndarray:
-    """Draw every detection. Modifies and returns `frame`."""
+    """Draw every detection. Modifies and returns `frame`.
+
+    Args:
+        flip_warning_below: draw the "stem end uncertain" chip when the flip
+            confidence falls below this. The default matches the shipped
+            paprika.policy.min_flip_confidence, so out of the box the chip
+            appears on exactly the fruit the policy will send round again -
+            which is the point of it. It is a parameter rather than a constant
+            because a threshold that stops tracking the decision it describes
+            is worse than no chip at all: the operator would be watching a
+            warning that no longer means anything.
+    """
     if frame is None or not isinstance(frame, np.ndarray) or not detections:
         return frame
 
@@ -125,10 +137,12 @@ def draw_detections(
         if angle is not None:
             arrow_len = max(24.0, min(x2 - x1, y2 - y1) * 0.55)
             draw_orientation_arrow(frame, center, angle, arrow_len, color, 3 if is_primary else 2)
-        elif pose in ("upside_down", "incomplete"):
+        elif pose in ("upside_down", "stem_not_found", "incomplete"):
             # A cross, not a circle. A circle reads as "still deciding", a
             # cross as "nothing is coming out of this" - and the latter is the
-            # case.
+            # case. stem_not_found belongs here rather than with the circle
+            # below: no stem found on a fully visible fruit is a settled
+            # reject, not a measurement still in progress.
             radius = max(10, int(min(x2 - x1, y2 - y1) * 0.16))
             cx, cy = int(center[0]), int(center[1])
             cv2.line(frame, (cx - radius, cy - radius), (cx + radius, cy + radius), color, 3)
@@ -160,7 +174,7 @@ def draw_detections(
         next_y = _chip(frame, x1, y1 - 22, label, color, font_scale)
 
         flip_conf = orientation.get("flip_confidence", 0.0)
-        if angle is not None and flip_conf < 0.4:
+        if angle is not None and flip_conf < flip_warning_below:
             # The single most useful warning on this screen: the axis is fine
             # but the machine is not sure which end the stem is on.
             _chip(frame, x1, next_y + 2, "stem end uncertain", _COLOR_REORIENT, font_scale - 0.06)

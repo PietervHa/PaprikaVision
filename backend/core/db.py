@@ -117,7 +117,7 @@ result_detections_table = Table(
 )
 
 # Maintenance-mode accounts. There is no web-facing registration route --
-# accounts are created/removed only via QC_tools/manage_users.py, which
+# accounts are created/removed only via tools/manage_users.py, which
 # needs shell access to the machine. password_hash is produced by
 # backend.core.auth.hash_password(); this module never sees a plaintext
 # password.

@@ -64,6 +64,7 @@ class BeltCrop:
         self._lock = threading.Lock()
         self._box: Optional[tuple[int, int, int, int]] = None
         self._computed_at = 0.0
+        self._shape: Optional[tuple] = None
         self._failed_once = False
 
     def _compute(self, frame: np.ndarray) -> Optional[tuple[int, int, int, int]]:
@@ -75,9 +76,12 @@ class BeltCrop:
         if len(xs) < 100:
             return None
 
+        # The mask is held at BELT_SCALE, so its coordinates are scaled back up
+        # to frame coordinates here.
+        scale = 1.0 / classical.BELT_SCALE
         height, width = frame.shape[:2]
-        x1, x2 = int(xs.min()), int(xs.max())
-        y1, y2 = int(ys.min()), int(ys.max())
+        x1, x2 = int(xs.min() * scale), int(xs.max() * scale)
+        y1, y2 = int(ys.min() * scale), int(ys.max() * scale)
 
         pad_x = int((x2 - x1) * self._margin)
         pad_y = int((y2 - y1) * self._margin)
@@ -95,8 +99,16 @@ class BeltCrop:
             return None
 
         now = time.time()
+        shape = frame.shape[:2]
         with self._lock:
-            fresh = self._box is not None and (now - self._computed_at) < self._refresh_s
+            # A cached box belongs to the frame size it was measured on. Reusing
+            # it across a size change hands back a box that runs off the image.
+            same_frame = self._shape == shape
+            fresh = (
+                same_frame
+                and self._box is not None
+                and (now - self._computed_at) < self._refresh_s
+            )
             if fresh:
                 return self._box
 
@@ -104,6 +116,7 @@ class BeltCrop:
 
         with self._lock:
             self._computed_at = now
+            self._shape = shape
             if box is None:
                 # Show the whole frame rather than guessing. An operator seeing
                 # the full sensor knows something is off; an operator seeing a
@@ -125,6 +138,7 @@ class BeltCrop:
         with self._lock:
             self._box = None
             self._computed_at = 0.0
+            self._shape = None
 
 
 def crop_frame_and_detections(

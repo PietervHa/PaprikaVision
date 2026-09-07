@@ -30,7 +30,41 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp"}
 # Targets from docs/ANNOTATION_SPEC.md section 6.
 TARGET_STEMLESS = 0.20
 TARGET_STANDING = 0.15
-STANDING_SPAN_RATIO = 0.18   # matches paprika.min_span_ratio
+
+# Fallback only, used when the config cannot be read - see
+# _standing_span_ratio(). Keep it equal to the shipped
+# paprika.min_span_ratio.
+DEFAULT_STANDING_SPAN_RATIO = 0.18
+
+
+def _standing_span_ratio() -> float:
+    """The span ratio below which a labelled fruit counts as standing.
+
+    Read from paprika.min_span_ratio rather than pinned here, because this is
+    the same test the runtime applies - and the whole value of the number this
+    tool prints is that it predicts what the running system will do with the
+    dataset. Two copies of the threshold means that the day somebody tunes the
+    runtime, this validator quietly starts reporting a standing rate for a
+    machine that no longer exists.
+
+    Falls back to the documented default when the config is unreadable: this
+    is a dataset validator and must still run on a machine that has the export
+    but not the application config.
+    """
+    try:
+        from backend.core.config_loader import cfg
+
+        block = cfg.get("paprika") or {}
+        return float(block.get("min_span_ratio", DEFAULT_STANDING_SPAN_RATIO))
+    except (Exception, SystemExit) as exc:
+        # SystemExit is deliberate: config_loader calls sys.exit() when the
+        # config file is missing or unparseable, and a dataset validator must
+        # not be killed by that.
+        print(
+            f"  ! could not read paprika.min_span_ratio ({exc}); using "
+            f"{DEFAULT_STANDING_SPAN_RATIO} for the standing check"
+        )
+        return DEFAULT_STANDING_SPAN_RATIO
 
 
 class Findings:
@@ -136,6 +170,7 @@ def check_split(split_dir: Path, findings: Findings, split_name: str) -> dict:
         return {}
 
     pending_order: list = []
+    standing_span_ratio = _standing_span_ratio()
 
     stats = {
         "images": len(images),
@@ -199,7 +234,7 @@ def check_split(split_dir: Path, findings: Findings, split_name: str) -> dict:
             span = math.hypot(dx, dy)
             diagonal = math.hypot(bw, bh)
 
-            if diagonal > 0 and span / diagonal < STANDING_SPAN_RATIO:
+            if diagonal > 0 and span / diagonal < standing_span_ratio:
                 stats["standing"] += 1
                 continue
 

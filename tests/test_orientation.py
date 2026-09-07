@@ -304,13 +304,19 @@ def test_engine_places_a_clear_fruit():
     assert orient.angular_difference(primary["angle_plc"], 25) < 5.0
 
 
-def test_stemless_fruit_is_reported_upside_down_without_coordinates():
-    """No stem findable on a fully visible fruit means you are looking at the
-    blossom end: the fruit is lying upside down.
+def test_stemless_fruit_is_reported_stem_not_found_not_upside_down():
+    """No stem findable on a fully visible fruit is recorded as its own state.
 
-    This is an end state, not a failed measurement. The robot cannot pick it up
-    and turn it over, so returning an angle would imply an action that does not
-    exist.
+    It used to be reported as `upside_down`, which asserts something the
+    backend never established: that the fruit is lying blossom-up. All it
+    really knows is that it could not find a stem. Conflating the two makes the
+    upside_down counter unusable as a diagnosis, because a climbing number
+    could equally mean the infeed is tipping fruit or that the stem detector
+    has stopped coping with this cultivar.
+
+    The reject decision is deliberately unchanged - this is a reporting split,
+    not a policy change - so the assertions on placement and coordinates are
+    the same ones the old test made.
     """
     image, _, _ = render_paprika(25, with_stem=False)
     result = _engine().evaluate(image)
@@ -318,15 +324,45 @@ def test_stemless_fruit_is_reported_upside_down_without_coordinates():
 
     assert result["status"] == "NOK"
     assert primary["placement"] == "reject"
-    assert primary["orientation"]["pose"] == orient.POSE_UPSIDE_DOWN
+    assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
+    assert primary["orientation"]["pose"] != orient.POSE_UPSIDE_DOWN
     assert primary["angle_plc"] is None
     assert primary["orientation"]["angle_deg"] is None
+    # The detector's own reason is kept on the record, so a result read back
+    # from the database can still be traced to the branch that produced it.
+    assert "no_stem" in primary["orientation"]["notes"]
 
 
-def test_fruit_running_off_the_frame_is_incomplete_not_upside_down():
+def test_stem_not_found_and_upside_down_are_counted_apart():
+    """The counters are the reason the split exists, so pin them.
+
+    A fruit the backend could not find a stem on must not increment the
+    upside_down counter, and the new key must exist from the start rather than
+    appearing only once the first such fruit goes past.
+    """
+    from backend.core.state import AppState
+
+    state = AppState()
+    assert state.counters["stem_not_found"] == 0
+    assert state.counters["upside_down"] == 0
+
+    state.increment_counter("NOK", placement="reject", pose=orient.POSE_STEM_NOT_FOUND)
+
+    counters = state.get_snapshot()["counters"]
+    assert counters["stem_not_found"] == 1
+    assert counters["upside_down"] == 0
+    assert counters["reject"] == 1
+
+    state.reset_counters()
+    assert state.counters["stem_not_found"] == 0
+
+
+def test_fruit_running_off_the_frame_is_incomplete_not_stem_not_found():
     """Half out of frame says something about the frame, not about the fruit -
-    it may have a perfectly good stem you simply cannot see. Conflating the two
-    would make the statistics on upside-down fruit useless."""
+    it may have a perfectly good stem you simply cannot see. Incomplete takes
+    precedence over stem_not_found for exactly that reason: counting a clipped
+    fruit as one the stem detector failed on would send somebody looking at the
+    lighting when the answer is the camera framing or the trigger timing."""
     image, _, _ = render_paprika(90, with_stem=True)
     # Remove the bottom half: the fruit now continues outside the frame. The
     # cut then spans 43% of the diameter, well above EDGE_CUT_THRESHOLD - a
@@ -340,6 +376,55 @@ def test_fruit_running_off_the_frame_is_incomplete_not_upside_down():
     assert primary["placement"] == "reject"
     assert primary["orientation"]["pose"] == orient.POSE_INCOMPLETE
     assert primary["angle_plc"] is None
+
+
+def test_centered_primary_rule_measures_from_the_frame_centre():
+    """"centered" must mean the middle of the frame, not the origin.
+
+    It used to measure |cx| + |cy| from (0, 0), so it actually preferred the
+    fruit nearest the TOP-LEFT CORNER - the one just entering the frame, whose
+    angle is measured from a partial silhouette. That is the precise opposite
+    of what the rule is for, and on a belt running left to right it silently
+    picked a different fruit on every frame.
+    """
+    def fake(cx, cy):
+        return {
+            "bbox": [cx - 40, cy - 30, cx + 40, cy + 30],
+            "center": [cx, cy],
+            "placement": "place",
+            "orientation": {"confidence": 0.9},
+        }
+
+    width, height = 900, 420
+    entering = fake(90, 45)          # near the origin
+    centred = fake(450, 210)         # actually in the middle
+
+    engine = _engine(primary_rule="centered")
+    assert engine._pick_primary([entering, centred], width, height) is centred
+    # Order must not decide it.
+    assert engine._pick_primary([centred, entering], width, height) is centred
+
+
+def test_centered_rule_without_a_frame_size_falls_back_to_largest():
+    """No frame size means the centre is unknowable.
+
+    Falling back to "largest" is the safe answer; quietly measuring from the
+    origin again would reinstate the bug in the one code path nobody looks at.
+    """
+    def fake(cx, cy, half_w):
+        return {
+            "bbox": [cx - half_w, cy - 30, cx + half_w, cy + 30],
+            "center": [cx, cy],
+            "placement": "place",
+            "orientation": {"confidence": 0.9},
+        }
+
+    small_near_origin = fake(60, 40, 20)
+    large_far_away = fake(700, 380, 90)
+
+    engine = _engine(primary_rule="centered")
+    picked = engine._pick_primary([small_near_origin, large_far_away], 0, 0)
+    assert picked is large_far_away
 
 
 def test_unstable_stem_is_sent_for_reorientation_not_placed():

@@ -12,6 +12,25 @@ from backend.core.config_loader import cfg
 
 VALID_VISION_MODES = ("paprika", "idle")
 
+# Poses counted individually, because each points at a different thing to go
+# and fix: upside_down at the infeed, incomplete at the camera framing or the
+# trigger timing, stem_not_found at the stem detector, the lighting or the
+# cultivar. All three are rejected the same way; only the reason differs, and
+# the reason is the whole point of counting them apart.
+COUNTED_POSES = ("upside_down", "stem_not_found", "incomplete")
+
+# One definition, used both to initialise and to reset. Two literal dicts is
+# how a counter gets added in one place and then silently resurrects itself
+# with a stale set of keys in the other.
+_EMPTY_COUNTERS = {
+    "ok": 0,
+    "nok": 0,
+    "total": 0,
+    "reorient": 0,
+    "reject": 0,
+    **{pose: 0 for pose in COUNTED_POSES},
+}
+
 
 class AppState:
     def __init__(self):
@@ -24,8 +43,7 @@ class AppState:
             "primary": None,
             "processing_time_ms": 0,
         }
-        self.counters = {"ok": 0, "nok": 0, "total": 0, "reorient": 0,
-                         "reject": 0, "upside_down": 0, "incomplete": 0}
+        self.counters = dict(_EMPTY_COUNTERS)
 
         self.vision_mode = str(cfg.get("vision_mode", "paprika"))
         self.maintenance_mode = False
@@ -57,16 +75,15 @@ class AppState:
                 self.counters["nok"] += 1
             if placement in ("reorient", "reject"):
                 self.counters[placement] += 1
-            # Counted separately, because they are two different problems: a
-            # lot of upside_down points at the infeed, a lot of incomplete at
-            # the camera framing or the trigger timing.
-            if pose in ("upside_down", "incomplete"):
+            # See COUNTED_POSES: these are counted apart because they are
+            # different problems with different fixes, not because the machine
+            # treats them differently - it does not.
+            if pose in COUNTED_POSES:
                 self.counters[pose] += 1
 
     def reset_counters(self):
         with self.lock:
-            self.counters = {"ok": 0, "nok": 0, "total": 0, "reorient": 0,
-                         "reject": 0, "upside_down": 0, "incomplete": 0}
+            self.counters = dict(_EMPTY_COUNTERS)
 
     def get_snapshot(self) -> dict:
         with self.lock:

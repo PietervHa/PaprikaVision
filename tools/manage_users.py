@@ -8,11 +8,11 @@ interactively via getpass; they are never accepted as a command-line
 argument, so they never end up in shell history or a process listing.
 
 Usage:
-    python -m QC_tools.manage_users add <username>
-    python -m QC_tools.manage_users passwd <username>
-    python -m QC_tools.manage_users list
-    python -m QC_tools.manage_users remove <username>
-    python -m QC_tools.manage_users logins [--limit N]
+    python -m tools.manage_users add <username>
+    python -m tools.manage_users passwd <username>
+    python -m tools.manage_users list
+    python -m tools.manage_users remove <username>
+    python -m tools.manage_users logins [--limit N]
 """
 from __future__ import annotations
 

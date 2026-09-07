@@ -70,6 +70,19 @@ def create_app(camera, app_state) -> FastAPI:
     OVERLAY_STALE_S = float(hmi_cfg.get("overlay_stale_after_s", 2.0))
     CROP_TO_BELT = bool(hmi_cfg.get("crop_to_belt", True))
 
+    # The "stem end uncertain" chip should mark exactly the fruit the policy
+    # will send round again, so it defaults to the policy threshold rather than
+    # to a number of its own. Set hmi.flip_warning_below only if you
+    # deliberately want the overlay to warn earlier (or later) than the machine
+    # acts - leaving it null keeps the two from drifting apart.
+    policy_cfg = (cfg.get("paprika") or {}).get("policy") or {}
+    _flip_warning_cfg = hmi_cfg.get("flip_warning_below", None)
+    FLIP_WARNING_BELOW = float(
+        policy_cfg.get("min_flip_confidence", 0.40)
+        if _flip_warning_cfg is None
+        else _flip_warning_cfg
+    )
+
     shape_cfg = (cfg.get("paprika") or {}).get("shape") or {}
     belt_hue_cfg = shape_cfg.get("belt_hue") or [96, 145]
     belt_crop = BeltCrop(
@@ -142,6 +155,7 @@ def create_app(camera, app_state) -> FastAPI:
                     detections,
                     primary_center=primary.get("center"),
                     show_keypoints=DRAW_KEYPOINTS,
+                    flip_warning_below=FLIP_WARNING_BELOW,
                 )
 
             if DRAW_HUD:

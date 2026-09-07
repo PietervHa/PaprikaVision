@@ -175,6 +175,7 @@ function renderLive(live) {
 
   const poseLabels = {
     upside_down: "upside down — cannot be picked",
+    stem_not_found: "stem not found — nothing to measure",
     incomplete: "incomplete in frame",
     standing_stem_up: "standing, stem up",
     standing_stem_down: "standing, stem down",

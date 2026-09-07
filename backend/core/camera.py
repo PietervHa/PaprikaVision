@@ -192,15 +192,17 @@ def _apply_manual_settings(cap, cam_cfg):
     auto-exposure can't drift between (or during) runs.
 
     Why this exists: with auto-exposure free-running, the same physical
-    scene produces different pixel values from one cycle to the next. That
-    feeds straight into the blackhat threshold in text_locator.py (an
-    absolute intensity cutoff) and into recognition confidence, so OCR
-    accuracy moves for reasons that have nothing to do with the product or
-    the code. Measured drift on this rig has been large enough to swamp the
-    code changes being A/B tested - accuracy moved from 92.5% to 75% within
-    a single uninterrupted session on one setup - which makes locking these
-    a prerequisite for any meaningful before/after comparison, not just a
-    nice-to-have.
+    scene produces different pixel values from one cycle to the next. The
+    shape backend thresholds on absolute saturation and excludes an absolute
+    belt hue range, and auto white-balance moves both, so segmentation
+    quality changes for reasons that have nothing to do with the fruit or
+    the code. On the OCR machine this project grew out of, the same drift was
+    large enough to swamp the code changes being A/B tested - accuracy moved
+    from 92.5% to 75% within a single uninterrupted session - which makes
+    locking these a prerequisite for any meaningful before/after comparison,
+    not just a nice-to-have. It also poisons a training set: images collected
+    under drifting exposure teach the model that a paprika's appearance is
+    inherently unstable.
 
     Every setting is optional: a key left out of config (or set to null) is
     simply not touched, so this can be adopted one property at a time.
@@ -348,7 +350,9 @@ class Camera:
         self.lock = threading.Lock()
         self.latest_frame = None
         self.running = True
-        self._flip = cfg["camera"]["flip"]
+        # Optional, like in image_source.py: a config without camera.flip
+        # must not stop the camera from starting. None means "don't flip".
+        self._flip = cfg.get("camera", {}).get("flip", None)
 
         # Connection health, readable from any thread (plain bool reads/
         # writes are atomic under the GIL, so no extra lock is needed here).
@@ -516,8 +520,16 @@ class Camera:
                 backoff = RECONNECT_MIN_INTERVAL
                 next_reconnect_attempt = 0.0
                 try:
-                    # Flip the frame (1 = horizontal, 0 = vertical, -1 = both)
-                    processed = cv2.flip(frame, self._flip)
+                    # Flip the frame (1 = horizontal, 0 = vertical, -1 = both).
+                    # Skipped entirely when camera.flip is absent or null.
+                    if self._flip is not None:
+                        processed = cv2.flip(frame, int(self._flip))
+                    else:
+                        # Copy anyway. cv2.flip always allocated a new array,
+                        # so publishing the worker's own frame object here
+                        # would newly allow the capture thread to write into
+                        # an array a reader is holding.
+                        processed = frame.copy()
                     rotation = self.app_state.get_camera_rotation() if self.app_state else 0
                     if rotation == 1:
                         processed = cv2.rotate(processed, cv2.ROTATE_90_CLOCKWISE)
