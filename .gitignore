@@ -7,6 +7,7 @@ data/results/
 data/results.db
 data/debug/
 data/datasets/
+data/raw/
 models/*.pt
 runs/
 .pytest_cache/
