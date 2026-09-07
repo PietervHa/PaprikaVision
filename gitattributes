@@ -1,0 +1,31 @@
+# Line endings
+#
+# Without this file the repository has no opinion on line endings, so whatever
+# each machine happened to write got committed verbatim. The result was seven
+# files (auth.py, camera.py, db.py, tcp_trigger_server.py, result_writer.py,
+# logger.py, manage_users.py) stored with LF but sitting on disk as CRLF, which
+# git reports as every single line changed - camera.py alone showed 1228
+# modified lines while its content was byte-identical. Files that are
+# permanently "modified" make the diff useless exactly when you need it, and
+# hide the real change among thousands of phantom ones.
+#
+# text=auto means: decide per file whether it is text, normalise text to LF in
+# the repository, and check it out in whatever form the platform wants. The
+# working tree is unaffected on Windows once core.autocrlf=true is set; what
+# changes is that git stops seeing a difference where there is none.
+* text=auto
+
+# Binary files. Marked explicitly rather than left to auto-detection: a false
+# positive here does not produce a noisy diff, it corrupts the file by
+# rewriting bytes that happen to look like line endings.
+*.png binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.bmp binary
+*.tif binary
+*.tiff binary
+*.db binary
+*.pt binary
+*.pth binary
+*.zip binary
