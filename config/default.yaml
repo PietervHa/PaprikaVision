@@ -340,6 +340,58 @@ trigger:
 output:
   result_dir: "data/results"
 
+# -----------------------------------------------------------------------------
+# debug: diagnostic capture. Everything here writes to data/debug/ and nowhere
+# else - no counter, no result, nothing that reaches the PLC.
+# -----------------------------------------------------------------------------
+debug:
+
+  # Save the RAW frame behind every non-placeable verdict, so a failure can be
+  # re-run later with:
+  #
+  #     python -m tools.diagnose_frames data/debug/failures
+  #
+  # This is the artefact you cannot reconstruct afterwards. An HMI screenshot
+  # shows the verdict but not the input, and the input is what decides whether
+  # the fault is in the stem search, the split, the segmentation or the policy.
+  #
+  # OFF by default: it costs disk, and a machine running well has no reason to
+  # be writing anything here. Turn it on while investigating, and off again.
+  save_failures: false
+
+  failures_dir: "data/debug/failures"
+
+  # A frame is captured when a fruit comes back reorient, reject or unknown.
+  # Frames with NO detections are never captured: an empty belt is the normal
+  # state, so that would save the whole shift. A fruit missed entirely is a
+  # real failure this will not catch - save that one by hand.
+  #
+  # Two limits, and the interval matters more than it looks. A belt that stops
+  # with one rejected fruit under the camera reproduces the same failure at the
+  # overlay rate indefinitely; without a minimum gap you would return to tens of
+  # thousands of copies of one pepper.
+  max_failures_per_run: 200
+  min_interval_s: 2.0
+
+  # The engine's own verdict, written alongside each frame. Cheap, and it is
+  # what lets you tell "the detector saw it differently that day" from "the
+  # detector sees it differently now".
+  save_result_json: true
+
+  # png or jpg. Default png, and measured rather than assumed: these frames are
+  # an INPUT to segmentation, and re-encoding moves the answer. Across ten
+  # fruit, JPEG at quality 95 shifted the reported stem angle by up to 4.1
+  # degrees and at quality 80 by 8.1; PNG shifted it by exactly zero on every
+  # one. Against a max_stem_spread_deg of 6.0 that is not a rounding
+  # difference - a frame saved as JPEG can cross the stability threshold purely
+  # by being saved, and you would spend the afternoon investigating the
+  # compression rather than the fault.
+  #
+  # Costs about 1.2 MB a frame against 160 KB. Switch to jpg only if disk is
+  # genuinely tight, and then treat small angle differences with suspicion.
+  image_format: "png"
+  jpeg_quality: 95
+
 database:
   url: "sqlite:///data/results.db"
 
