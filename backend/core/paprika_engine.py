@@ -112,6 +112,20 @@ class PaprikaEngine:
         self._belt_hue = (int(belt[0]), int(belt[1]))
         self._min_span_ratio = float(block.get("min_span_ratio", 0.18))
 
+        # When the classical backend cannot find a stem at all on a fully-
+        # visible fruit, ask the silhouette instead of rejecting outright: a
+        # paprika is measurably wider at the stem end (the shoulder, where
+        # the calyx sits) than at the blossom end, and that is readable from
+        # the outline alone - no stem required. See _shape_only_estimate().
+        #
+        # This is attempted ONLY on a fruit shape_orientation() itself calls
+        # "lying" (elongated). A round silhouette - standing on either end -
+        # is left exactly as before: detected and rejected, with no angle
+        # invented for it, because there is no wider end to read when the
+        # camera is looking straight down the long axis rather than along
+        # its side.
+        self._stemless_shape_fallback = bool(block.get("stemless_shape_fallback", True))
+
         # Placement policy thresholds.
         policy = block.get("policy") if isinstance(block.get("policy"), dict) else {}
         self._min_angle_confidence = float(policy.get("min_angle_confidence", 0.45))
@@ -141,6 +155,7 @@ class PaprikaEngine:
         status.update(
             {
                 "shape_crosscheck": self._use_shape_crosscheck,
+                "stemless_shape_fallback": self._stemless_shape_fallback,
                 "angle_offset_deg": self._angle_offset_deg,
                 "angle_invert": self._angle_invert,
                 "primary_rule": self._primary_rule,
@@ -196,6 +211,48 @@ class PaprikaEngine:
         # fonts, which are ASCII-only and render anything else as "??".
         return f"stem {result.angle_deg:.0f} deg{suffix}"
 
+    def _shape_only_estimate(
+        self, frame: np.ndarray, bbox: tuple[int, int, int, int]
+    ) -> Optional[Orientation]:
+        """Silhouette-only orientation for a fruit whose stem could not be found.
+
+        Only ever called for REASON_NO_STEM, never for an edge-clipped fruit -
+        a partial silhouette has no trustworthy width profile either, and
+        that case is handled by the caller before this is reached.
+
+        Runs shape_orientation() directly rather than through orient.estimate(),
+        which fuses it against keypoints that simply do not exist on this
+        path. Returns None - never a half-finished Orientation - whenever the
+        mask cannot be produced, or the fruit turns out to be round: a round
+        silhouette means the fruit is standing on one end or the other, and
+        there is no wider end to read when the camera is looking straight
+        down the long axis rather than along its side. "Detect it, do not
+        guess an angle for it" is the correct answer there, not a gap to
+        work around.
+
+        The angle this returns, when it returns one, still goes through the
+        normal _placement_for() gate below like any other estimate - a weak
+        width signal (this backend's median on real fruit was 0.074, per the
+        measurement behind paprika.shape_crosscheck) is sent for
+        reorientation rather than placed on a guess.
+        """
+        if frame is None:
+            return None
+        mask = orient.segment_fruit(
+            frame, bbox, saturation_floor=self._saturation_floor, belt_hue=self._belt_hue
+        )
+        if mask is None:
+            return None
+
+        result = orient.shape_orientation(mask)
+        if result.pose != orient.POSE_LYING or result.angle_deg is None:
+            return None
+
+        result.source = "shape_only"
+        result.notes.append("no_stem")
+        result.notes.append("shape_fallback")
+        return result
+
     def _evaluate_one(self, frame: np.ndarray, detection: dict) -> dict:
         bbox = detection["bbox"]
         landmarks: dict = detection.get("keypoints") or {}
@@ -214,7 +271,18 @@ class PaprikaEngine:
         # cannot pick up an upside-down fruit and turn it over. Returning a
         # number would imply an action that does not exist.
         reason = str(detection.get("unpickable_reason") or "")
-        if reason:
+        result: Optional[Orientation] = None
+
+        if reason == "no_stem" and self._stemless_shape_fallback:
+            # No stem found, but the fruit is fully in frame. Before writing
+            # it off, ask the one estimator that never looks at the stem.
+            # Returns None (and falls through to the plain reject below)
+            # whenever the silhouette turns out to be round - that is a
+            # standing or upside-down fruit, and it should be detected, not
+            # guessed at.
+            result = self._shape_only_estimate(frame, bbox)
+
+        if reason and result is None:
             pose = _UNPICKABLE_POSES.get(reason, orient.POSE_UPSIDE_DOWN)
             unusable = Orientation(
                 source="classical",
@@ -241,16 +309,17 @@ class PaprikaEngine:
                 "stem_method": detection.get("stem_method", "none"),
             }
 
-        result = orient.estimate(
-            frame=frame if use_shape else None,
-            bbox=bbox,
-            stem=stem,
-            blossom=blossom,
-            use_shape=use_shape,
-            saturation_floor=self._saturation_floor,
-            belt_hue=self._belt_hue,
-            min_span_ratio=self._min_span_ratio,
-        )
+        if result is None:
+            result = orient.estimate(
+                frame=frame if use_shape else None,
+                bbox=bbox,
+                stem=stem,
+                blossom=blossom,
+                use_shape=use_shape,
+                saturation_floor=self._saturation_floor,
+                belt_hue=self._belt_hue,
+                min_span_ratio=self._min_span_ratio,
+            )
 
         placement = self._placement_for(result)
 

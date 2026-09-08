@@ -275,6 +275,7 @@ def _engine(**overrides):
     block = {
         "backend": "shape",
         "shape_crosscheck": False,
+        "stemless_shape_fallback": True,
         "shape": {
             "saturation_floor": 80,
             "belt_hue": [96, 145],
@@ -304,8 +305,8 @@ def test_engine_places_a_clear_fruit():
     assert orient.angular_difference(primary["angle_plc"], 25) < 5.0
 
 
-def test_stemless_fruit_is_reported_stem_not_found_not_upside_down():
-    """No stem findable on a fully visible fruit is recorded as its own state.
+def test_standing_stemless_fruit_is_reported_stem_not_found():
+    """A round, stemless silhouette is standing on one end or the other.
 
     It used to be reported as `upside_down`, which asserts something the
     backend never established: that the fruit is lying blossom-up. All it
@@ -314,11 +315,14 @@ def test_stemless_fruit_is_reported_stem_not_found_not_upside_down():
     could equally mean the infeed is tipping fruit or that the stem detector
     has stopped coping with this cultivar.
 
-    The reject decision is deliberately unchanged - this is a reporting split,
-    not a policy change - so the assertions on placement and coordinates are
-    the same ones the old test made.
+    This must stay a plain, angle-free reject regardless of the shape
+    fallback below: looking straight down the long axis, a round silhouette
+    has no wider end to read, so shape_orientation() itself declines to
+    guess (elongation below min_elongation) and the fallback has nothing to
+    offer here. Standing fruit is detected, not oriented - on purpose.
     """
-    image, _, _ = render_paprika(25, with_stem=False)
+    image = np.full((400, 400, 3), BELT, np.uint8)
+    cv2.circle(image, (200, 200), 70, COLORS["red"], -1)
     result = _engine().evaluate(image)
     primary = result["primary"]
 
@@ -331,6 +335,47 @@ def test_stemless_fruit_is_reported_stem_not_found_not_upside_down():
     # The detector's own reason is kept on the record, so a result read back
     # from the database can still be traced to the branch that produced it.
     assert "no_stem" in primary["orientation"]["notes"]
+
+
+def test_lying_stemless_fruit_gets_a_shape_based_angle():
+    """The case paprika.stemless_shape_fallback exists for.
+
+    Stem broke off in the crate, but the fruit is clearly lying on its side -
+    elongated, shoulder wider than tip. Outright rejecting this throws away
+    a perfectly readable silhouette, so it is measured directly instead of
+    being folded into the round-and-standing case above.
+    """
+    image, _, _ = render_paprika(25, with_stem=False)
+    result = _engine().evaluate(image)
+    primary = result["primary"]
+
+    assert primary["orientation"]["pose"] == orient.POSE_LYING
+    assert primary["orientation"]["source"] == "shape_only"
+    assert orient.angular_difference(primary["angle_plc"], 25) < 5.0
+    # Strong, well-tapered synthetic shoulder: confident enough to place, not
+    # just to measure. A weaker real-world taper is expected to land on
+    # "reorient" instead - see the flip-confidence gate this still goes
+    # through, unchanged, in _placement_for().
+    assert primary["placement"] == "place"
+    assert result["status"] == "OK"
+    # Provenance survives onto the record, same as the standing case.
+    assert "no_stem" in primary["orientation"]["notes"]
+    assert "shape_fallback" in primary["orientation"]["notes"]
+
+
+def test_stemless_shape_fallback_can_be_switched_off():
+    """paprika.stemless_shape_fallback: false restores the old behaviour.
+
+    A commissioning engineer who finds the fallback guessing wrong on their
+    cultivar needs a config change, not a code change, to turn it off.
+    """
+    image, _, _ = render_paprika(25, with_stem=False)
+    result = _engine(stemless_shape_fallback=False).evaluate(image)
+    primary = result["primary"]
+
+    assert primary["placement"] == "reject"
+    assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
+    assert primary["orientation"]["angle_deg"] is None
 
 
 def test_stem_not_found_and_upside_down_are_counted_apart():
