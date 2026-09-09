@@ -19,8 +19,9 @@ from dotenv import load_dotenv
 
 log = logging.getLogger(__name__)
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(_PROJECT_ROOT / ".env")
+from backend.utils.paths import PROJECT_ROOT, project_path
+
+load_dotenv(PROJECT_ROOT / ".env")
 
 _VALID_BACKENDS = {"shape", "pose", "simulator"}
 _VALID_MODES = {"paprika", "idle"}
@@ -31,7 +32,7 @@ def _load_config() -> dict:
     parser.add_argument("--config", type=str, default=None, help="Path to config YAML file")
     args, _ = parser.parse_known_args()
 
-    config_path = Path(args.config) if args.config else _PROJECT_ROOT / "config" / "default.yaml"
+    config_path = Path(args.config) if args.config else PROJECT_ROOT / "config" / "default.yaml"
 
     if not config_path.exists():
         log.error("Configuration file not found: %s", config_path)
@@ -68,9 +69,7 @@ def _validate(config: dict) -> dict:
 
     if backend == "pose":
         pose_cfg = block.get("pose") if isinstance(block.get("pose"), dict) else {}
-        model_path = Path(str(pose_cfg.get("model_path", "")))
-        if not model_path.is_absolute():
-            model_path = _PROJECT_ROOT / model_path
+        model_path = project_path(pose_cfg.get("model_path", ""))
         if not model_path.exists():
             # Not fatal: the detector reports "not ready" and the HMI shows it,
             # which is friendlier than refusing to boot on a machine where

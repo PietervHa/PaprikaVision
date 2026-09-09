@@ -7,7 +7,8 @@ with custom filtering for web server noise.
 
 import logging
 import re
-from pathlib import Path
+
+from backend.utils.paths import project_path
 
 
 class _SuppressResultPollFilter(logging.Filter):
@@ -44,7 +45,7 @@ def setup_logging():
     if getattr(root_logger, "_vision_logging_configured", False):
         return
 
-    logs_dir = Path(__file__).resolve().parents[2] / "data" / "logs"
+    logs_dir = project_path("data/logs")
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     formatter = logging.Formatter(

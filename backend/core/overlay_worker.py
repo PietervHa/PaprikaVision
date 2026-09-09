@@ -38,15 +38,16 @@ import queue
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 import cv2
 
 from backend.core.config_loader import cfg
 from backend.utils.logger import get_logger
+from backend.utils.paths import project_path
 
 log = get_logger(__name__)
+
 
 
 class _FailureCapture:
@@ -73,7 +74,7 @@ class _FailureCapture:
 
     def __init__(self, block: dict) -> None:
         self.enabled = bool(block.get("save_failures", False))
-        self._dir = Path(str(block.get("failures_dir", "data/debug/failures")))
+        self._dir = project_path(block.get("failures_dir"), "data/debug/failures")
         self._max_per_run = int(block.get("max_failures_per_run", 200))
         self._min_interval_s = float(block.get("min_interval_s", 2.0))
         self._save_json = bool(block.get("save_result_json", True))
@@ -97,8 +98,16 @@ class _FailureCapture:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._last_save = 0.0
+        # Four counters rather than one, because they fail differently and the
+        # difference is the whole diagnosis. `accepted` is what passed the rate
+        # limit and the cap; `written` is what actually reached the disk. An
+        # earlier version incremented one counter at accept time and called it
+        # "written", so a run whose every write threw still reported success -
+        # precisely the reassurance a diagnostic must never give.
+        self._accepted = 0
         self._written = 0
         self._dropped = 0
+        self._errors = 0
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------- lifecycle
@@ -129,10 +138,10 @@ class _FailureCapture:
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
         self._thread = None
-        if self._written or self._dropped:
+        if self._accepted or self._dropped or self._errors:
             log.info(
-                "Failure capture: %d frame(s) written, %d dropped",
-                self._written, self._dropped,
+                "Failure capture: %d frame(s) written to %s, %d dropped, %d failed",
+                self._written, self._dir, self._dropped, self._errors,
             )
 
     # ------------------------------------------------------------- producing
@@ -165,14 +174,17 @@ class _FailureCapture:
 
         now = time.time()
         with self._lock:
-            if self._written >= self._max_per_run:
+            # Capped on what was accepted, not on what landed: a failing disk
+            # must not be allowed to retry forever behind a cap that never
+            # advances.
+            if self._accepted >= self._max_per_run:
                 return
             if now - self._last_save < self._min_interval_s:
                 return
             # Claimed before the write happens: two cycles must not both slip
             # past the interval check while the first is still queued.
             self._last_save = now
-            self._written += 1
+            self._accepted += 1
 
         placement = str(failure.get("placement") or "unknown")
         pose = str((failure.get("orientation") or {}).get("pose") or "none")
@@ -183,7 +195,7 @@ class _FailureCapture:
             self._queue.put_nowait((stem, frame, result))
         except queue.Full:
             with self._lock:
-                self._written -= 1
+                self._accepted -= 1
                 self._dropped += 1
 
     # --------------------------------------------------------------- writing
@@ -197,7 +209,11 @@ class _FailureCapture:
             stem, frame, result = item
             try:
                 self._write(stem, frame, result)
+                with self._lock:
+                    self._written += 1
             except Exception as exc:
+                with self._lock:
+                    self._errors += 1
                 # Never let a write failure kill the thread: the next frame may
                 # well succeed, and a silently dead capture thread is worse
                 # than a logged failed write.
@@ -224,9 +240,13 @@ class _FailureCapture:
     def status(self) -> dict:
         return {
             "enabled": self.enabled,
+            # Absolute, so "where are my frames" is answerable from /status
+            # without knowing what directory the process was launched from.
             "dir": str(self._dir),
+            "accepted": self._accepted,
             "written": self._written,
             "dropped": self._dropped,
+            "errors": self._errors,
             "max_per_run": self._max_per_run,
         }
 

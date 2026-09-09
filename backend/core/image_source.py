@@ -33,6 +33,7 @@ import numpy as np
 
 from backend.core.config_loader import cfg
 from backend.utils.logger import get_logger
+from backend.utils.paths import project_path
 
 log = get_logger(__name__)
 
@@ -223,9 +224,7 @@ def build_source(app_state):
 
     if source == "folder":
         folder_cfg = camera_cfg.get("folder") if isinstance(camera_cfg.get("folder"), dict) else {}
-        path = Path(str(folder_cfg.get("path", "data/raw")))
-        if not path.is_absolute():
-            path = Path(__file__).resolve().parents[2] / path
+        path = project_path(folder_cfg.get("path"), "data/raw")
 
         if path.is_dir():
             return ImageFolderSource(

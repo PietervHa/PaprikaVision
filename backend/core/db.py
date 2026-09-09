@@ -36,7 +36,6 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any, Optional
 
 from sqlalchemy import (
@@ -59,6 +58,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
 from backend.core.config_loader import cfg
+from backend.utils.paths import project_path
 
 log = logging.getLogger(__name__)
 
@@ -152,8 +152,7 @@ def _resolve_sqlite_url(url: str) -> str:
     if not url.startswith(prefix) or url.startswith("sqlite:////"):
         return url  # not sqlite, or already an absolute path
     relative_part = url[len(prefix):]
-    repo_root = Path(__file__).resolve().parents[2]
-    absolute_path = (repo_root / relative_part).resolve()
+    absolute_path = project_path(relative_part).resolve()
     absolute_path.parent.mkdir(parents=True, exist_ok=True)
     return f"{prefix}{absolute_path}"
 
