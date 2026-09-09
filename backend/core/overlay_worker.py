@@ -78,6 +78,23 @@ class _FailureCapture:
         self._max_per_run = int(block.get("max_failures_per_run", 200))
         self._min_interval_s = float(block.get("min_interval_s", 2.0))
         self._save_json = bool(block.get("save_result_json", True))
+
+        # Poses that are NOT worth a frame. Measured, not guessed: over a
+        # 50-frame run, 4 of the 7 captured frames were a correctly placed
+        # fruit sitting beside a second fruit half out of shot. On a moving
+        # belt every fruit enters and leaves the frame, so edge_clipped is
+        # guaranteed on a large share of frames - it says the fruit was at the
+        # edge, which is geometry, not a fault in anything the detector did.
+        # Left in, it buries the cases you turned capture on to find.
+        #
+        # Set to [] to capture everything, e.g. when checking that the edge
+        # logic itself is behaving.
+        ignore = block.get("ignore_poses", ["incomplete"])
+        if isinstance(ignore, str):          # a single pose written without a list
+            ignore = [ignore]
+        self._ignore_poses = {
+            str(pose).strip().lower() for pose in (ignore or []) if str(pose).strip()
+        }
         # PNG by default, and measured rather than assumed. These frames are an
         # INPUT to segmentation, and re-encoding moves the answer: across ten
         # fruit, JPEG at quality 95 shifted the reported stem angle by up to
@@ -108,6 +125,12 @@ class _FailureCapture:
         self._written = 0
         self._dropped = 0
         self._errors = 0
+        # Counts evaluations whose only failures were ignored poses, so an
+        # empty folder has an explanation rather than being a mystery. It
+        # counts EVALUATIONS, not distinct fruit: the overlay re-evaluates the
+        # same scene several times a second, so read it as "the ignore list is
+        # doing something", not as a fruit count.
+        self._ignored = 0
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------- lifecycle
@@ -128,8 +151,10 @@ class _FailureCapture:
         )
         self._thread.start()
         log.info(
-            "Failure capture on -> %s (max %d per run, min %.1fs apart)",
+            "Failure capture on -> %s (max %d per run, min %.1fs apart, "
+            "ignoring poses: %s)",
             self._dir, self._max_per_run, self._min_interval_s,
+            ", ".join(sorted(self._ignore_poses)) or "none",
         )
 
     def stop(self) -> None:
@@ -146,8 +171,7 @@ class _FailureCapture:
 
     # ------------------------------------------------------------- producing
 
-    @staticmethod
-    def _first_failure(result: dict) -> Optional[dict]:
+    def _first_failure(self, result: dict) -> Optional[dict]:
         """The detection that makes this frame worth keeping, or None.
 
         Frames with no detections at all are deliberately NOT captured. An
@@ -155,13 +179,34 @@ class _FailureCapture:
         failure would save the whole shift. A fruit that was missed entirely is
         a real failure and this will not catch it - that one needs a frame
         saved by hand.
+
+        An ignored pose does not disqualify the FRAME, only that fruit. A scene
+        with one clipped fruit and one the stem search failed on is exactly the
+        scene worth keeping, so the search continues past the clipped one
+        rather than stopping at the first non-placeable thing it meets.
+
+        The primary is considered first so that, when it is itself the
+        interesting failure, the filename carries its verdict rather than a
+        bystander's.
         """
-        primary = result.get("primary")
-        if isinstance(primary, dict) and primary.get("placement") not in (None, "place"):
-            return primary
-        for detection in result.get("detections") or []:
-            if detection.get("placement") != "place":
-                return detection
+        candidates = [result.get("primary")]
+        candidates.extend(result.get("detections") or [])
+
+        ignored_any = False
+        for detection in candidates:
+            if not isinstance(detection, dict):
+                continue
+            if detection.get("placement") in (None, "place"):
+                continue
+            pose = str((detection.get("orientation") or {}).get("pose") or "").lower()
+            if pose in self._ignore_poses:
+                ignored_any = True
+                continue
+            return detection
+
+        if ignored_any:
+            with self._lock:
+                self._ignored += 1
         return None
 
     def offer(self, frame, result: dict) -> None:
@@ -247,6 +292,8 @@ class _FailureCapture:
             "written": self._written,
             "dropped": self._dropped,
             "errors": self._errors,
+            "ignored": self._ignored,
+            "ignore_poses": sorted(self._ignore_poses),
             "max_per_run": self._max_per_run,
         }
 

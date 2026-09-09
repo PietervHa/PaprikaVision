@@ -345,6 +345,14 @@ output:
 # else - no counter, no result, nothing that reaches the PLC.
 # -----------------------------------------------------------------------------
 debug:
+  #An ignored pose disqualifies that fruit, not the frame. A scene with one clipped fruit and one the stem search
+  #failed on is exactly the scene worth keeping, so the search continues past the clipped one instead of stopping
+  #at the first non-placeable thing it meets. The primary is checked first, so when it's itself the interesting
+  #failure the filename carries its verdict rather than a bystander's.
+
+  #ignore_poses: [ ] captures everything again — useful if you ever want to check the edge-clipping logic itself.
+
+  ignore_poses: ["incomplete"]
 
   # Save the RAW frame behind every non-placeable verdict, so a failure can be
   # re-run later with:
@@ -357,7 +365,7 @@ debug:
   #
   # OFF by default: it costs disk, and a machine running well has no reason to
   # be writing anything here. Turn it on while investigating, and off again.
-  save_failures: false
+  save_failures: true
 
   failures_dir: "data/debug/failures"
 
