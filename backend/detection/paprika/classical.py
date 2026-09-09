@@ -137,6 +137,23 @@ SPLIT_DISTANCE_RATIO = 0.45
 # Hue separation, in OpenCV units, before two regions count as different fruit
 # rather than one fruit and its stem.
 SPLIT_MIN_HUE_SEPARATION = 20
+# Fixed seed for the hue clustering below. cv2.kmeans draws its initial centres
+# from OpenCV's global RNG, and nothing was seeding it, so the SAME blob
+# clustered twice produced different centres, a different measured hue
+# separation, and therefore a different answer to "is this one fruit or two".
+# Measured on a real frame: 25 identical evaluations gave 4 different verdicts,
+# the most common being one paprika placed TWICE at angles 180 degrees apart.
+# Any constant will do; what matters is that detection is a function of the
+# frame and nothing else.
+SPLIT_HUE_RNG_SEED = 0
+# A split part must still look like a paprika. Area and solidity alone let a
+# shadowed lobe through: on real frames the smaller half of a bad split ran to
+# an elongation of 2.47 on a 90x226 box, while a blokpaprika has a median
+# elongation of 1.33 and the most elongated whole fruit measured was 1.67.
+# Anything long and thin is a lobe, a stem or a shadow edge, not a second
+# fruit, and vetoing the split leaves the blob whole - which is the safe
+# reading, since a merged blob is still measured once instead of twice.
+SPLIT_MAX_PART_ELONGATION = 2.0
 
 # Only blobs that could plausibly hold two fruit are examined at all. A single
 # compact paprika needs no splitting, and attempting it on every blob doubled
@@ -441,16 +458,55 @@ def _solidity(mask: np.ndarray) -> float:
     return float(cv2.contourArea(contour) / max(1.0, cv2.contourArea(hull)))
 
 
+def _elongation(mask: np.ndarray) -> float:
+    """Long-axis over short-axis of the pixel distribution.
+
+    Second central moments rather than minAreaRect: a rectangle is fitted to
+    the extremes and so is dominated by the one stray pixel furthest out, while
+    the moments describe the whole blob. This is the same quantity
+    orientation.shape_orientation reports, so a number here can be compared
+    directly against one from there.
+
+    Returns 1.0 for anything too small or too degenerate to measure, which
+    reads as "perfectly round" and therefore never vetoes a split on its own.
+    """
+    moments = cv2.moments((mask > 0).astype(np.uint8), binaryImage=True)
+    if moments["m00"] <= 0:
+        return 1.0
+    mu20 = moments["mu20"] / moments["m00"]
+    mu02 = moments["mu02"] / moments["m00"]
+    mu11 = moments["mu11"] / moments["m00"]
+    common = math.sqrt(max(0.0, 4.0 * mu11 ** 2 + (mu20 - mu02) ** 2))
+    major = (mu20 + mu02 + common) / 2.0
+    minor = (mu20 + mu02 - common) / 2.0
+    if minor <= 1e-6:
+        return 1.0
+    return math.sqrt(major / minor)
+
+
 def _plausible_parts(
     parts: list[np.ndarray], min_part_area: float = SPLIT_MIN_PART_AREA
 ) -> Optional[list[np.ndarray]]:
-    """Accept a split only if every part could be a paprika on its own."""
+    """Accept a split only if every part could be a paprika on its own.
+
+    Three tests, and they fail differently. Area rejects stems and specks.
+    Solidity rejects stringy fragments. Elongation rejects the case the other
+    two miss: a shadowed lobe of ONE fruit, which is large enough and solid
+    enough to pass as a paprika but far too long and thin to be one. That was
+    reaching the actuator as a second fruit with its own angle.
+
+    Rejecting the split is the conservative outcome. It leaves the blob whole,
+    so the fruit is measured once - possibly badly - rather than twice with
+    contradictory answers.
+    """
     if len(parts) < 2:
         return None
     for part in parts:
         if int((part > 0).sum()) < min_part_area:
             return None
         if _solidity(part) < SPLIT_MIN_SOLIDITY:
+            return None
+        if _elongation(part) > SPLIT_MAX_PART_ELONGATION:
             return None
     return parts
 
@@ -544,6 +600,12 @@ def split_by_hue(
         sample = to_circle(values)
 
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)
+    # Seeded immediately before the draw, not once at import: OpenCV's RNG is
+    # global and advances on every use, so seeding at startup would only make
+    # the FIRST call repeatable. Note this does reset the global stream, which
+    # is harmless here because this is the only OpenCV RNG consumer in the
+    # detector - if another is ever added, both need thinking about together.
+    cv2.setRNGSeed(SPLIT_HUE_RNG_SEED)
     _, _, centers = cv2.kmeans(sample, 2, None, criteria, 4, cv2.KMEANS_PP_CENTERS)
 
     angles = [math.atan2(c[1], c[0]) for c in centers]
