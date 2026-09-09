@@ -147,13 +147,33 @@ SPLIT_MIN_HUE_SEPARATION = 20
 # frame and nothing else.
 SPLIT_HUE_RNG_SEED = 0
 # A split part must still look like a paprika. Area and solidity alone let a
-# shadowed lobe through: on real frames the smaller half of a bad split ran to
-# an elongation of 2.47 on a 90x226 box, while a blokpaprika has a median
-# elongation of 1.33 and the most elongated whole fruit measured was 1.67.
-# Anything long and thin is a lobe, a stem or a shadow edge, not a second
-# fruit, and vetoing the split leaves the blob whole - which is the safe
-# reading, since a merged blob is still measured once instead of twice.
-SPLIT_MAX_PART_ELONGATION = 2.0
+# shadowed lobe through, so elongation is checked too.
+#
+# Calibrated against every split observed over a 1968-frame run, measured on
+# the part masks themselves rather than on a bbox crop:
+#
+#     two touching fruit          1.21 / 1.27      legitimate
+#     two touching fruit          1.26 / 1.35      legitimate
+#     two touching fruit          1.27 / 2.11      legitimate
+#     fruit + clipped neighbour   1.47 / 2.95      legitimate
+#     fruit + its own lobe        1.98 / 3.58      PHANTOM
+#
+# 3.2 sits in the gap. An earlier value of 2.0 looked safe on a seven-frame
+# sample and cost two real placements on the full run - the gap I claimed was
+# empty had two legitimate splits in it. This one is narrow (2.95 to 3.58) and
+# rests on a single phantom, so re-check it when more data arrives rather than
+# trusting it the way the first number was trusted.
+SPLIT_MAX_PART_ELONGATION = 3.2
+
+# Above this, a detection that sits mostly inside a larger one is a piece of
+# that larger one - a shadowed band, a lobe cut off by the saturation floor -
+# rather than a second fruit. Only applied together with a shape test: a whole
+# healthy fruit can legitimately have its box swallowed by a merged blob's box
+# beside it, and dropping that would lose real fruit. See _drop_contained().
+CONTAINED_MIN_OVERLAP = 0.70
+CONTAINED_MAX_AREA_RATIO = 0.50
+CONTAINED_MAX_ELONGATION = 2.5
+CONTAINED_MIN_SOLIDITY = 0.75
 
 # Only blobs that could plausibly hold two fruit are examined at all. A single
 # compact paprika needs no splitting, and attempting it on every blob doubled
@@ -1278,7 +1298,64 @@ def find_fruit(
                 measure(part, sub_crop, sub_hsv, sub_hue, (rx1 + bx, ry1 + by))
 
     fruits.sort(key=lambda f: f.area, reverse=True)
+    fruits = _drop_contained(fruits)
     return fruits[:max_fruit]
+
+
+def _bbox_containment(small: tuple, big: tuple) -> float:
+    """How much of `small`'s box lies inside `big`'s, as a fraction of `small`."""
+    overlap_w = max(0, min(small[2], big[2]) - max(small[0], big[0]))
+    overlap_h = max(0, min(small[3], big[3]) - max(small[1], big[1]))
+    small_area = max(1, (small[2] - small[0]) * (small[3] - small[1]))
+    return (overlap_w * overlap_h) / small_area
+
+
+def _drop_contained(fruits: list[ClassicalFruit]) -> list[ClassicalFruit]:
+    """Remove detections that are a piece of a larger detection.
+
+    The splitter guards blobs it splits, but nothing guarded blobs that arrive
+    already separate. A shadowed band along a fruit's edge, dark enough to fall
+    below the saturation floor, becomes its own connected component and then
+    its own fruit - with its own angle, sent to the actuator as if a second
+    paprika were lying there.
+
+    Containment alone is not enough to act on, and this is the trap. Over a
+    1968-frame run four detections were mostly inside a larger one:
+
+        211x40  elongation 4.68              a shadow sliver, and it was PLACED
+        214x79  elongation 2.34 solidity 0.64  a shadow band, also PLACED
+        219x104 elongation 1.83               an edge strip, already rejected
+        281x240 elongation 1.21 solidity 0.98  A WHOLE HEALTHY FRUIT
+
+    The last one is why the shape test is not optional: two fruit side by side,
+    one of them merged with a third into a wide blob, leaves a perfectly good
+    fruit's box sitting inside its neighbour's. Dropping on containment alone
+    would have thrown it away. Requiring the small one to ALSO be misshapen -
+    too long and thin, or too ragged - separates all four correctly.
+    """
+    if len(fruits) < 2:
+        return fruits
+
+    kept: list[ClassicalFruit] = []
+    for fruit in fruits:
+        swallowed = False
+        for other in fruits:
+            if other is fruit or other.area <= fruit.area:
+                continue
+            if _bbox_containment(fruit.bbox, other.bbox) < CONTAINED_MIN_OVERLAP:
+                continue
+            if fruit.area / max(1, other.area) > CONTAINED_MAX_AREA_RATIO:
+                continue
+            misshapen = (
+                _elongation(fruit.mask) > CONTAINED_MAX_ELONGATION
+                or _solidity(fruit.mask) < CONTAINED_MIN_SOLIDITY
+            )
+            if misshapen:
+                swallowed = True
+                break
+        if not swallowed:
+            kept.append(fruit)
+    return kept
 
 
 def edge_cut_ratio(fruit: ClassicalFruit, frame_shape: tuple, margin: int = EDGE_MARGIN_PX) -> float:
