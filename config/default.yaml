@@ -365,7 +365,7 @@ debug:
   #
   # OFF by default: it costs disk, and a machine running well has no reason to
   # be writing anything here. Turn it on while investigating, and off again.
-  save_failures: true
+  save_failures: false
 
   failures_dir: "data/debug/failures"
 
