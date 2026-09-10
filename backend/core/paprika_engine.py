@@ -228,8 +228,13 @@ class PaprikaEngine:
 
     def _shape_only_estimate(
         self, frame: np.ndarray, bbox: tuple[int, int, int, int]
-    ) -> Optional[Orientation]:
+    ) -> tuple[Optional[Orientation], list[str]]:
         """Silhouette-only orientation for a fruit whose stem could not be found.
+
+        Returns (orientation, notes). The orientation is None whenever the
+        silhouette cannot support one; the notes still describe what was seen,
+        so declining to answer is recorded as a measurement rather than as
+        silence.
 
         Only ever called for REASON_NO_STEM, never for an edge-clipped fruit -
         a partial silhouette has no trustworthy width profile either, and
@@ -250,12 +255,12 @@ class PaprikaEngine:
         reorientation rather than placed on a guess.
         """
         if frame is None:
-            return None
+            return None, []
         mask = orient.segment_fruit(
             frame, bbox, saturation_floor=self._saturation_floor, belt_hue=self._belt_hue
         )
         if mask is None:
-            return None
+            return None, []
 
         result = orient.shape_orientation(mask)
 
@@ -263,22 +268,27 @@ class PaprikaEngine:
             result.source = "shape_only"
             result.notes.append("no_stem")
             result.notes.append("shape_fallback")
-            return result
+            return result, []
 
-        # `result.elongation` is only ever set once shape_orientation() has
-        # actually run its PCA over real mask pixels (see its "mask_too_small"
-        # early-return, which leaves it at the dataclass default of 0.0). So
-        # `> 0.0` here means "this was measured and came back round", not
-        # "the mask was too thin a sliver to say anything" - the latter is
-        # genuinely uninformative and still falls through to a plain reject.
+        # A round silhouette used to be reported as POSE_STANDING_STEM_DOWN,
+        # on the reasoning that a fruit with no visible stem and no long axis
+        # must be standing on end. Measurement does not support it: a
+        # blokpaprika is close to a rounded cube, so it is round in outline
+        # from every direction, and over 225 red-fruit frames 43% of correctly
+        # PLACED fruit measured below the same 1.12 roundness line. Two frames
+        # make the point on their own - one fruit genuinely blossom-up
+        # measured 1.084, another lying flat on its side measured 1.073.
+        #
+        # So roundness cannot tell "standing" from "lying with the stem hidden
+        # or facing away", and claiming otherwise put a confident pose on a
+        # coin toss. What this branch actually knows is that no stem was
+        # found, which is what it now says. The reject is unchanged; only the
+        # claim is. The measurement is passed back as a note so the reason is
+        # still on the record.
         if result.pose == orient.POSE_UNKNOWN and result.elongation > 0.0:
-            result.pose = orient.POSE_STANDING_STEM_DOWN
-            result.source = "shape_only"
-            result.notes.append("no_stem")
-            result.notes.append("round_silhouette_standing")
-            return result
+            return None, [f"round_silhouette (elongation={result.elongation:.2f})"]
 
-        return None
+        return None, []
 
     def _evaluate_one(self, frame: np.ndarray, detection: dict) -> dict:
         bbox = detection["bbox"]
@@ -299,6 +309,10 @@ class PaprikaEngine:
         # number would imply an action that does not exist.
         reason = str(detection.get("unpickable_reason") or "")
         result: Optional[Orientation] = None
+        # Diagnostics from the shape fallback survive even when it declines to
+        # produce an orientation - "I looked and the silhouette was round" is
+        # a different record from "I never looked".
+        fallback_notes: list[str] = []
 
         if reason == "no_stem" and self._stemless_shape_fallback:
             # No stem found, but the fruit is fully in frame. Before writing
@@ -307,7 +321,7 @@ class PaprikaEngine:
             # whenever the silhouette turns out to be round - that is a
             # standing or upside-down fruit, and it should be detected, not
             # guessed at.
-            result = self._shape_only_estimate(frame, bbox)
+            result, fallback_notes = self._shape_only_estimate(frame, bbox)
 
         if reason and result is None:
             pose = _UNPICKABLE_POSES.get(reason, orient.POSE_UPSIDE_DOWN)
@@ -315,7 +329,7 @@ class PaprikaEngine:
                 source="classical",
                 pose=pose,
                 stem_present=False,
-                notes=[reason],
+                notes=[reason, *fallback_notes],
             )
             x1, y1, x2, y2 = bbox
             return {

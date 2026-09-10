@@ -305,27 +305,24 @@ def test_engine_places_a_clear_fruit():
     assert orient.angular_difference(primary["angle_plc"], 25) < 5.0
 
 
-def test_standing_stemless_fruit_is_reported_standing_stem_down():
-    """A round, fully-segmented, stemless silhouette is standing stem-down.
+def test_round_stemless_fruit_is_reported_stem_not_found_not_standing():
+    """A round, stemless silhouette says "no stem found", not "standing".
 
-    Earlier revisions of this test pinned the opposite conclusion -
-    STEM_NOT_FOUND, on the grounds that "no stem found" only asserts a gap in
-    the detector, not that the fruit is genuinely blossom-up. That reasoning
-    undersells what a round silhouette actually rules out: on an overhead
-    camera, a fruit standing stem-UP shows its stem as an isolated
-    protrusion near the centre of a round blob, pointing straight at the
-    lens - precisely the shape both the colour and morphology stem routes
-    are built to catch. Neither catching anything on a silhouette that was
-    actually measured (not just too small to read) is itself the evidence
-    that there is nothing pointing at the camera to catch, i.e. the stem is
-    underneath.
+    An earlier revision concluded the opposite: that a round blob with no
+    detectable stem must be standing blossom-up, because a stem pointing at an
+    overhead lens is exactly what the colour and morphology routes are built to
+    catch, so catching nothing proves the stem is underneath.
 
-    Still a plain, angle-free reject either way - looking straight down the
-    long axis, a round silhouette has no wider end to read, so no rotation
-    is invented. What changes is only the *label*, so a climbing
-    standing_stem_down count is now traceable to the infeed (fruit landing
-    blossom-up) rather than lumped into the same bucket as a stem detector
-    that is genuinely missing something visible.
+    Field measurement does not support that. A blokpaprika is close to a
+    rounded cube, so its outline is round from every direction, not only down
+    the long axis. Across 225 red-fruit frames, 43% of correctly PLACED fruit
+    measured below the same 1.12 roundness line the rule fired on. Two frames
+    settle it: one fruit genuinely blossom-up measured 1.084, and one lying
+    flat on its side with its stem hidden measured 1.073. Roundness cannot
+    separate those, so a pose claimed from it is a coin toss wearing a label.
+
+    The reject is unchanged - a round stemless fruit is unplaceable either way.
+    What changes is that the record now says what was actually established.
     """
     image = np.full((400, 400, 3), BELT, np.uint8)
     cv2.circle(image, (200, 200), 70, COLORS["red"], -1)
@@ -334,24 +331,35 @@ def test_standing_stemless_fruit_is_reported_standing_stem_down():
 
     assert result["status"] == "NOK"
     assert primary["placement"] == "reject"
-    assert primary["orientation"]["pose"] == orient.POSE_STANDING_STEM_DOWN
-    assert primary["orientation"]["pose"] != orient.POSE_STEM_NOT_FOUND
+    assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
+    assert primary["orientation"]["pose"] != orient.POSE_STANDING_STEM_DOWN
     assert primary["angle_plc"] is None
     assert primary["orientation"]["angle_deg"] is None
-    # The detector's own reason is kept on the record, so a result read back
-    # from the database can still be traced to the branch that produced it.
     assert "no_stem" in primary["orientation"]["notes"]
-    assert "round_silhouette_standing" in primary["orientation"]["notes"]
+
+
+def test_declining_to_guess_still_records_what_was_measured():
+    """Falling through must not look the same as never having looked.
+
+    The roundness measurement is kept on the record, so a result read back
+    later distinguishes "the silhouette was measured and was round" from "the
+    fallback never ran".
+    """
+    image = np.full((400, 400, 3), BELT, np.uint8)
+    cv2.circle(image, (200, 200), 70, COLORS["red"], -1)
+    notes = _engine().evaluate(image)["primary"]["orientation"]["notes"]
+
+    assert any(n.startswith("round_silhouette") for n in notes), notes
 
 
 def test_standing_stemless_fallback_can_be_switched_off():
     """paprika.stemless_shape_fallback: false restores the plain reject.
 
-    Same image as the test above, fallback disabled: the round silhouette is
-    never even measured for standing, so it falls back to the older, more
-    conservative STEM_NOT_FOUND - a commissioning engineer who finds the
-    inference wrong for their cultivar needs a config change, not a code
-    change, to turn it off.
+    Same image as the test above, fallback disabled. The pose is the same
+    either way now that roundness no longer implies standing; what the switch
+    still controls is whether an ELONGATED stemless fruit gets a silhouette
+    angle at all (the test below), and whether the round case is measured
+    before being rejected.
     """
     image = np.full((400, 400, 3), BELT, np.uint8)
     cv2.circle(image, (200, 200), 70, COLORS["red"], -1)
