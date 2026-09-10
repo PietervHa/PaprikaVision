@@ -187,6 +187,25 @@ paprika:
     # false -> reported as "reorient" instead
     reject_standing: true
 
+    # What to do with a fruit whose stem could not be found while the fruit
+    # itself is fully in frame.
+    #
+    # true  -> reorient. The default, because "no stem found" describes what
+    #          this VIEW failed to show, not what the fruit is: very often the
+    #          stem is facing away or tucked underneath, and one more pass
+    #          shows it. Costs a cycle, keeps the fruit.
+    # false -> reject, the older behaviour. Choose this only if a second pass
+    #          is expensive on your line and you would rather bin the fruit.
+    #
+    # This matters most on green, where _stem_by_hue returns nothing by design
+    # (stem and flesh share a hue) and morphology carries the load. Rejecting
+    # here would send a large share of a green crop to the bin for a
+    # limitation of the camera angle rather than a fault in the fruit.
+    #
+    # It never places a guess either way: there is still no angle, so nothing
+    # wrong can reach the actuator.
+    reorient_stem_not_found: true
+
     # Maximum movement of the stem direction, in degrees, when the same fruit
     # is re-detected under an 8% lighting change. Above this the fruit is sent
     # for reorientation instead of placed.

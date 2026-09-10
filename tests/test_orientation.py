@@ -291,7 +291,14 @@ def _engine(**overrides):
         "frame": {"angle_offset_deg": 0.0, "angle_invert": False},
         "primary_rule": "largest",
     }
-    block.update(overrides)
+    # Merge the nested blocks rather than replacing them: _engine(policy={...})
+    # should override one policy key, not silently drop the other four and
+    # leave the engine running on its own defaults.
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(block.get(key), dict):
+            block[key] = {**block[key], **value}
+        else:
+            block[key] = value
     return PaprikaEngine({"paprika": block})
 
 
@@ -330,7 +337,9 @@ def test_round_stemless_fruit_is_reported_stem_not_found_not_standing():
     primary = result["primary"]
 
     assert result["status"] == "NOK"
-    assert primary["placement"] == "reject"
+    # Reorient, not reject: see paprika.policy.reorient_stem_not_found. No
+    # angle is produced either way, so nothing wrong can reach the actuator.
+    assert primary["placement"] == "reorient"
     assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
     assert primary["orientation"]["pose"] != orient.POSE_STANDING_STEM_DOWN
     assert primary["angle_plc"] is None
@@ -366,7 +375,7 @@ def test_standing_stemless_fallback_can_be_switched_off():
     result = _engine(stemless_shape_fallback=False).evaluate(image)
     primary = result["primary"]
 
-    assert primary["placement"] == "reject"
+    assert primary["placement"] == "reorient"
     assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
     assert primary["orientation"]["angle_deg"] is None
 
@@ -407,7 +416,7 @@ def test_stemless_shape_fallback_can_be_switched_off():
     result = _engine(stemless_shape_fallback=False).evaluate(image)
     primary = result["primary"]
 
-    assert primary["placement"] == "reject"
+    assert primary["placement"] == "reorient"
     assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
     assert primary["orientation"]["angle_deg"] is None
 
@@ -631,3 +640,43 @@ def test_labels_stay_ascii_for_opencv():
     image, _, _ = render_paprika(25)
     label = _engine().evaluate(image)["primary"]["label"]
     assert label.isascii(), f"non-ASCII label would render as ?? : {label!r}"
+
+def test_stem_not_found_is_reoriented_not_rejected():
+    """A hidden stem is a fact about the view, not about the fruit.
+
+    upside_down and incomplete are end states - nothing the line can do about
+    them. "No stem found" is different: very often the stem is facing away or
+    tucked underneath and one more pass shows it, so binning the fruit throws
+    away good produce for a limitation of the camera angle. It matters most on
+    green, where _stem_by_hue returns nothing by design and this branch will
+    carry most of the crop.
+
+    Still no angle either way, so nothing wrong can reach the actuator.
+    """
+    image = np.full((400, 400, 3), BELT, np.uint8)
+    cv2.circle(image, (200, 200), 70, COLORS["red"], -1)
+    primary = _engine().evaluate(image)["primary"]
+
+    assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
+    assert primary["placement"] == "reorient"
+    assert primary["angle_plc"] is None
+
+
+def test_reorient_stem_not_found_can_be_switched_off():
+    """A line where a second pass is expensive can still choose to bin it."""
+    image = np.full((400, 400, 3), BELT, np.uint8)
+    cv2.circle(image, (200, 200), 70, COLORS["red"], -1)
+    primary = _engine(policy={"reorient_stem_not_found": False}).evaluate(image)["primary"]
+
+    assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
+    assert primary["placement"] == "reject"
+
+
+def test_upside_down_is_still_rejected():
+    """The switch must not leak into the genuine end states."""
+    from backend.core.paprika_engine import PaprikaEngine, PLACEMENT_REJECT
+    from backend.detection.paprika.orientation import Orientation
+
+    engine = _engine()
+    for pose in (orient.POSE_UPSIDE_DOWN, orient.POSE_INCOMPLETE):
+        assert engine._placement_for(Orientation(pose=pose)) == PLACEMENT_REJECT

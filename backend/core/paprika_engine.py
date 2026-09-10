@@ -146,6 +146,16 @@ class PaprikaEngine:
         self._min_angle_confidence = float(policy.get("min_angle_confidence", 0.45))
         self._min_flip_confidence = float(policy.get("min_flip_confidence", 0.40))
         self._reject_standing = bool(policy.get("reject_standing", True))
+        # A fruit whose stem could not be found is not the same as a fruit that
+        # cannot be picked. Very often the stem is simply facing away or tucked
+        # underneath, and one more pass down the line shows it. Rejecting
+        # throws away good produce for a limitation of the view; reorienting
+        # costs a cycle and keeps the fruit. It matters most on green, where
+        # _stem_by_hue returns nothing by design and this branch will carry
+        # most of the crop.
+        self._reorient_stem_not_found = bool(
+            policy.get("reorient_stem_not_found", True)
+        )
         # Maximum measured movement of the stem direction under a lighting
         # change before the fruit is sent round again instead of placed.
         self._max_stem_spread_deg = float(policy.get("max_stem_spread_deg", 6.0))
@@ -187,11 +197,13 @@ class PaprikaEngine:
         an honest "I don't know" just sends it round again. The costs are not
         symmetric, so the thresholds are not either.
         """
-        if result.pose in (
-            orient.POSE_UPSIDE_DOWN,
-            orient.POSE_STEM_NOT_FOUND,
-            orient.POSE_INCOMPLETE,
-        ):
+        if result.pose == orient.POSE_STEM_NOT_FOUND:
+            return (
+                PLACEMENT_REORIENT if self._reorient_stem_not_found
+                else PLACEMENT_REJECT
+            )
+
+        if result.pose in (orient.POSE_UPSIDE_DOWN, orient.POSE_INCOMPLETE):
             return PLACEMENT_REJECT
 
         if result.pose in (orient.POSE_STANDING_STEM_UP, orient.POSE_STANDING_STEM_DOWN):
@@ -340,11 +352,12 @@ class PaprikaEngine:
                 "keypoints": {},
                 "orientation": unusable.to_dict(),
                 "angle_plc": None,
-                # Unchanged by the stem_not_found split, and deliberately so:
-                # this is a reporting distinction, not a policy one. A fruit
-                # whose stem cannot be found is exactly as unplaceable as it
-                # was before it had its own name.
-                "placement": PLACEMENT_REJECT,
+                # upside_down and incomplete are end states - nothing the line
+                # can do changes them. stem_not_found is not: it describes what
+                # this view failed to show, not what the fruit is, so by
+                # default it goes round again instead of into the bin. See
+                # paprika.policy.reorient_stem_not_found.
+                "placement": self._placement_for(unusable),
                 "simulated": False,
                 "colour": detection.get("colour", ""),
                 "stem_method": detection.get("stem_method", "none"),
