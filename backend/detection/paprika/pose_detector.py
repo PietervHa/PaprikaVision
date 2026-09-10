@@ -189,7 +189,18 @@ class PaprikaDetector:
                 # Feeding a fixed 0.85 here was what let a loosely pinned stem
                 # on a green fruit reach the PLC looking as certain as a stem
                 # separated cleanly by colour.
-                quality = float(fruit.stem_quality or 0.5)
+                #
+                # `fruit.stem_quality` is a plain float (default 0.0), always
+                # assigned before stem_end/blossom_end are, so it is never
+                # genuinely absent here - `or 0.5` was not filling in a
+                # missing value, it was overwriting a real one. The stability
+                # self-check legitimately reports exactly 0.0 for a stem
+                # whose direction moved too much under a lighting change to
+                # trust at all (see _stem_selfcheck), and `x or 0.5` treats
+                # that 0.0 as falsy and silently promotes it to a middling
+                # 0.5 - turning "reject this, it is unstable" into "somewhat
+                # confident", which is backwards. Use the value as computed.
+                quality = float(fruit.stem_quality)
                 landmarks["stem_end"] = Keypoint(
                     fruit.stem_end[0], fruit.stem_end[1], quality, True
                 )

@@ -66,20 +66,25 @@ paprika:
   #
   # A paprika is measurably wider at the stem end (the shoulder, where the
   # calyx sits) than at the blossom end, and that is readable from the
-  # outline alone - no stem required. This is attempted ONLY on a fruit
-  # shape_orientation() itself calls "lying" (elongation above
-  # min_elongation in orientation.py, currently 1.12). A round silhouette -
-  # standing on either end, stem up or stem down - is left exactly as
-  # before: reported as stem_not_found and rejected, with no angle invented
-  # for it, because there is no wider end to read when the camera is
-  # looking straight down the long axis instead of along its side.
+  # outline alone - no stem required, on a fruit shape_orientation() itself
+  # calls "lying" (elongation above min_elongation in orientation.py,
+  # currently 1.12).
+  #
+  # A round silhouette - standing on either end - has no wider end to read
+  # when the camera is looking straight down the long axis instead of along
+  # its side, so no angle is invented for it either way. It IS reported as
+  # standing_stem_down rather than a plain stem_not_found reject, though:
+  # a fruit standing stem-up would show its stem as an isolated protrusion
+  # near the centre of a round blob, which colour or morphology should have
+  # caught, so both routes finding nothing on a silhouette that was actually
+  # measured is itself the evidence the stem is underneath.
   #
   # The angle this produces still goes through policy.min_flip_confidence
   # below like any other estimate, so a weak signal is sent round again
   # rather than placed on a coin flip - see the measurement note on
   # shape_crosscheck above for how weak that signal usually is on real
-  # fruit. Set false to go back to rejecting every stemless fruit outright,
-  # lying or not.
+  # fruit. Set false to go back to rejecting every stemless fruit outright
+  # as stem_not_found, lying or not.
   stemless_shape_fallback: true
 
   # Landmark separation below this fraction of the box diagonal means the long

@@ -118,12 +118,27 @@ class PaprikaEngine:
         # the calyx sits) than at the blossom end, and that is readable from
         # the outline alone - no stem required. See _shape_only_estimate().
         #
-        # This is attempted ONLY on a fruit shape_orientation() itself calls
-        # "lying" (elongated). A round silhouette - standing on either end -
-        # is left exactly as before: detected and rejected, with no angle
-        # invented for it, because there is no wider end to read when the
-        # camera is looking straight down the long axis rather than along
-        # its side.
+        # Two shapes get an answer here, not one:
+        #
+        #   - "lying" (elongated): the width-profile fallback below measures
+        #     a real angle from the taper.
+        #   - round (standing on one end): there is no wider end to read
+        #     looking straight down the long axis, so no angle is invented -
+        #     but a round, fully-segmented silhouette on which colour AND
+        #     morphology both failed to find a stem is reported as
+        #     STANDING_STEM_DOWN rather than a plain reject. A stem pointing
+        #     AT the camera on a stand-up fruit shows as an isolated
+        #     protrusion near the centre of a round blob, which is exactly
+        #     the shape both stem routes are built to catch; one finding
+        #     nothing at all is itself the evidence that the stem is
+        #     underneath, not that the detector missed something visible.
+        #     This used to be folded into STEM_NOT_FOUND. It was pulled back
+        #     out for the same reason STEM_NOT_FOUND was split from
+        #     UPSIDE_DOWN in the first place: the two failure populations -
+        #     "expected, the fruit is genuinely blossom-up" versus "something
+        #     the stem detector should have caught did not get caught" -
+        #     point at different people, and conflating them makes both
+        #     counters unusable as a diagnosis.
         self._stemless_shape_fallback = bool(block.get("stemless_shape_fallback", True))
 
         # Placement policy thresholds.
@@ -222,13 +237,11 @@ class PaprikaEngine:
 
         Runs shape_orientation() directly rather than through orient.estimate(),
         which fuses it against keypoints that simply do not exist on this
-        path. Returns None - never a half-finished Orientation - whenever the
-        mask cannot be produced, or the fruit turns out to be round: a round
-        silhouette means the fruit is standing on one end or the other, and
-        there is no wider end to read when the camera is looking straight
-        down the long axis rather than along its side. "Detect it, do not
-        guess an angle for it" is the correct answer there, not a gap to
-        work around.
+        path. Returns None - never a half-finished Orientation - only when
+        the mask cannot be produced at all, or comes back too small to say
+        anything ("mask_too_small": genuinely no evidence, still a plain
+        reject). A silhouette that was actually measured and turned out
+        round is not that case - see below.
 
         The angle this returns, when it returns one, still goes through the
         normal _placement_for() gate below like any other estimate - a weak
@@ -245,13 +258,27 @@ class PaprikaEngine:
             return None
 
         result = orient.shape_orientation(mask)
-        if result.pose != orient.POSE_LYING or result.angle_deg is None:
-            return None
 
-        result.source = "shape_only"
-        result.notes.append("no_stem")
-        result.notes.append("shape_fallback")
-        return result
+        if result.pose == orient.POSE_LYING and result.angle_deg is not None:
+            result.source = "shape_only"
+            result.notes.append("no_stem")
+            result.notes.append("shape_fallback")
+            return result
+
+        # `result.elongation` is only ever set once shape_orientation() has
+        # actually run its PCA over real mask pixels (see its "mask_too_small"
+        # early-return, which leaves it at the dataclass default of 0.0). So
+        # `> 0.0` here means "this was measured and came back round", not
+        # "the mask was too thin a sliver to say anything" - the latter is
+        # genuinely uninformative and still falls through to a plain reject.
+        if result.pose == orient.POSE_UNKNOWN and result.elongation > 0.0:
+            result.pose = orient.POSE_STANDING_STEM_DOWN
+            result.source = "shape_only"
+            result.notes.append("no_stem")
+            result.notes.append("round_silhouette_standing")
+            return result
+
+        return None
 
     def _evaluate_one(self, frame: np.ndarray, detection: dict) -> dict:
         bbox = detection["bbox"]

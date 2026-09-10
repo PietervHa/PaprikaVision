@@ -305,21 +305,27 @@ def test_engine_places_a_clear_fruit():
     assert orient.angular_difference(primary["angle_plc"], 25) < 5.0
 
 
-def test_standing_stemless_fruit_is_reported_stem_not_found():
-    """A round, stemless silhouette is standing on one end or the other.
+def test_standing_stemless_fruit_is_reported_standing_stem_down():
+    """A round, fully-segmented, stemless silhouette is standing stem-down.
 
-    It used to be reported as `upside_down`, which asserts something the
-    backend never established: that the fruit is lying blossom-up. All it
-    really knows is that it could not find a stem. Conflating the two makes the
-    upside_down counter unusable as a diagnosis, because a climbing number
-    could equally mean the infeed is tipping fruit or that the stem detector
-    has stopped coping with this cultivar.
+    Earlier revisions of this test pinned the opposite conclusion -
+    STEM_NOT_FOUND, on the grounds that "no stem found" only asserts a gap in
+    the detector, not that the fruit is genuinely blossom-up. That reasoning
+    undersells what a round silhouette actually rules out: on an overhead
+    camera, a fruit standing stem-UP shows its stem as an isolated
+    protrusion near the centre of a round blob, pointing straight at the
+    lens - precisely the shape both the colour and morphology stem routes
+    are built to catch. Neither catching anything on a silhouette that was
+    actually measured (not just too small to read) is itself the evidence
+    that there is nothing pointing at the camera to catch, i.e. the stem is
+    underneath.
 
-    This must stay a plain, angle-free reject regardless of the shape
-    fallback below: looking straight down the long axis, a round silhouette
-    has no wider end to read, so shape_orientation() itself declines to
-    guess (elongation below min_elongation) and the fallback has nothing to
-    offer here. Standing fruit is detected, not oriented - on purpose.
+    Still a plain, angle-free reject either way - looking straight down the
+    long axis, a round silhouette has no wider end to read, so no rotation
+    is invented. What changes is only the *label*, so a climbing
+    standing_stem_down count is now traceable to the infeed (fruit landing
+    blossom-up) rather than lumped into the same bucket as a stem detector
+    that is genuinely missing something visible.
     """
     image = np.full((400, 400, 3), BELT, np.uint8)
     cv2.circle(image, (200, 200), 70, COLORS["red"], -1)
@@ -328,13 +334,33 @@ def test_standing_stemless_fruit_is_reported_stem_not_found():
 
     assert result["status"] == "NOK"
     assert primary["placement"] == "reject"
-    assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
-    assert primary["orientation"]["pose"] != orient.POSE_UPSIDE_DOWN
+    assert primary["orientation"]["pose"] == orient.POSE_STANDING_STEM_DOWN
+    assert primary["orientation"]["pose"] != orient.POSE_STEM_NOT_FOUND
     assert primary["angle_plc"] is None
     assert primary["orientation"]["angle_deg"] is None
     # The detector's own reason is kept on the record, so a result read back
     # from the database can still be traced to the branch that produced it.
     assert "no_stem" in primary["orientation"]["notes"]
+    assert "round_silhouette_standing" in primary["orientation"]["notes"]
+
+
+def test_standing_stemless_fallback_can_be_switched_off():
+    """paprika.stemless_shape_fallback: false restores the plain reject.
+
+    Same image as the test above, fallback disabled: the round silhouette is
+    never even measured for standing, so it falls back to the older, more
+    conservative STEM_NOT_FOUND - a commissioning engineer who finds the
+    inference wrong for their cultivar needs a config change, not a code
+    change, to turn it off.
+    """
+    image = np.full((400, 400, 3), BELT, np.uint8)
+    cv2.circle(image, (200, 200), 70, COLORS["red"], -1)
+    result = _engine(stemless_shape_fallback=False).evaluate(image)
+    primary = result["primary"]
+
+    assert primary["placement"] == "reject"
+    assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
+    assert primary["orientation"]["angle_deg"] is None
 
 
 def test_lying_stemless_fruit_gets_a_shape_based_angle():
@@ -400,6 +426,30 @@ def test_stem_not_found_and_upside_down_are_counted_apart():
 
     state.reset_counters()
     assert state.counters["stem_not_found"] == 0
+
+
+def test_standing_poses_are_counted_apart_from_stem_not_found():
+    """standing_stem_up/down get their own counters too, for the same reason.
+
+    A climbing standing_stem_down count means the infeed is landing fruit
+    blossom-up; a climbing stem_not_found count means the stem detector, the
+    lighting, or the cultivar. Folding one into the other at the counter
+    level would silently undo the point of separating them at the pose
+    level above.
+    """
+    from backend.core.state import AppState
+
+    state = AppState()
+    assert state.counters["standing_stem_down"] == 0
+    assert state.counters["standing_stem_up"] == 0
+
+    state.increment_counter("NOK", placement="reject", pose=orient.POSE_STANDING_STEM_DOWN)
+
+    counters = state.get_snapshot()["counters"]
+    assert counters["standing_stem_down"] == 1
+    assert counters["standing_stem_up"] == 0
+    assert counters["stem_not_found"] == 0
+    assert counters["reject"] == 1
 
 
 def test_fruit_running_off_the_frame_is_incomplete_not_stem_not_found():
