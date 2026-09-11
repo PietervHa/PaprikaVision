@@ -55,7 +55,6 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import IntegrityError
 
 from backend.core.config_loader import cfg
 from backend.utils.paths import project_path
@@ -115,36 +114,6 @@ result_detections_table = Table(
     Index("ix_result_detections_confidence", "confidence"),
     Index("ix_result_detections_text", "text"),
 )
-
-# Maintenance-mode accounts. There is no web-facing registration route --
-# accounts are created/removed only via tools/manage_users.py, which
-# needs shell access to the machine. password_hash is produced by
-# backend.core.auth.hash_password(); this module never sees a plaintext
-# password.
-users_table = Table(
-    "users",
-    metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("username", String(64), nullable=False, unique=True),
-    Column("password_hash", Text, nullable=False),
-    Column("created_at", DateTime, nullable=False),
-)
-
-# Every maintenance-mode login attempt, successful or not, so "who's been
-# logging in" is always auditable. `success` is stored as Integer (0/1)
-# rather than Boolean for the same MSSQL-portability reason as the rest of
-# this module -- see the module docstring.
-login_log_table = Table(
-    "login_log",
-    metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("timestamp", DateTime, nullable=False),
-    Column("username", String(64), nullable=False),
-    Column("success", Integer, nullable=False),
-    Column("ip_address", String(64), nullable=True),
-    Index("ix_login_log_timestamp", "timestamp"),
-)
-
 
 def _resolve_sqlite_url(url: str) -> str:
     """Resolve relative sqlite:/// paths against the repo root, like every other path in this project."""
@@ -338,132 +307,3 @@ def query_full(start: date, end: date) -> list[dict]:
     return results
 
 
-# --- Users -----------------------------------------------------------------
-
-def get_user(username: str) -> Optional[dict]:
-    """Look up one user by username (case-sensitive). Returns None if not found."""
-    cols = users_table.c
-    stmt = select(cols.id, cols.username, cols.password_hash, cols.created_at).where(
-        cols.username == username
-    )
-    with engine.connect() as conn:
-        row = conn.execute(stmt).mappings().first()
-    return dict(row) if row else None
-
-
-def create_user(username: str, password_hash: str) -> None:
-    """Insert a new user. Raises ValueError if the username already exists."""
-    try:
-        with engine.begin() as conn:
-            conn.execute(
-                users_table.insert().values(
-                    username=username,
-                    password_hash=password_hash,
-                    created_at=datetime.now(),
-                )
-            )
-    except IntegrityError as exc:
-        raise ValueError(f"User '{username}' already exists") from exc
-
-
-def set_password(username: str, password_hash: str) -> bool:
-    """Update a user's password hash. Returns True if the user existed."""
-    with engine.begin() as conn:
-        result = conn.execute(
-            users_table.update()
-            .where(users_table.c.username == username)
-            .values(password_hash=password_hash)
-        )
-    return result.rowcount > 0
-
-
-def list_users() -> list[dict]:
-    """All users, oldest first. Never includes password_hash."""
-    cols = users_table.c
-    stmt = select(cols.id, cols.username, cols.created_at).order_by(cols.created_at)
-    with engine.connect() as conn:
-        rows = conn.execute(stmt).mappings().all()
-    return [dict(r) for r in rows]
-
-
-def delete_user(username: str) -> bool:
-    """Delete a user by username. Returns True if a row was deleted."""
-    with engine.begin() as conn:
-        result = conn.execute(users_table.delete().where(users_table.c.username == username))
-    return result.rowcount > 0
-
-
-# --- Login log ---------------------------------------------------------------
-
-def record_login(username: str, success: bool, ip_address: Optional[str] = None) -> None:
-    """Record one login attempt, successful or not."""
-    with engine.begin() as conn:
-        conn.execute(
-            login_log_table.insert().values(
-                timestamp=datetime.now(),
-                username=username,
-                success=1 if success else 0,
-                ip_address=ip_address,
-            )
-        )
-
-
-def get_recent_failures_since_last_success(username: str, limit: int) -> list[datetime]:
-    """
-    Failed-login timestamps for `username` since their last successful login
-    (or since the beginning of the log if they've never succeeded), newest
-    first, capped at `limit` rows. Used to derive lockout state on demand --
-    see auth.lockout_until(). Only ever called for usernames that exist, so
-    an unknown username can never accumulate a strike count here.
-    """
-    cols = login_log_table.c
-    with engine.connect() as conn:
-        last_success = conn.execute(
-            select(func.max(cols.timestamp)).where(
-                and_(cols.username == username, cols.success == 1)
-            )
-        ).scalar()
-
-        stmt = select(cols.timestamp).where(
-            and_(cols.username == username, cols.success == 0)
-        )
-        if last_success is not None:
-            stmt = stmt.where(cols.timestamp > last_success)
-        stmt = stmt.order_by(cols.timestamp.desc()).limit(limit)
-
-        rows = conn.execute(stmt).scalars().all()
-    return list(rows)
-
-
-def clear_login_log() -> int:
-    """
-    Delete every row from login_log. Returns the number of rows deleted.
-    Note: since lockout state is derived from this table (see
-    get_recent_failures_since_last_success), clearing it also lifts any
-    lockout currently in effect, that's a deliberate, expected side effect,
-    not a bug, and gives an operator a manual way to unlock an account.
-    """
-    with engine.begin() as conn:
-        result = conn.execute(login_log_table.delete())
-    return result.rowcount
-
-
-def get_recent_logins(limit: int = 20) -> list[dict]:
-    """Most recent login attempts (successful and failed), newest first."""
-    cols = login_log_table.c
-    stmt = (
-        select(cols.timestamp, cols.username, cols.success, cols.ip_address)
-        .order_by(cols.timestamp.desc())
-        .limit(limit)
-    )
-    with engine.connect() as conn:
-        rows = conn.execute(stmt).mappings().all()
-    return [
-        {
-            "timestamp": row["timestamp"],
-            "username": row["username"],
-            "success": bool(row["success"]),
-            "ip_address": row["ip_address"],
-        }
-        for row in rows
-    ]

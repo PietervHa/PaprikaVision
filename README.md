@@ -5,12 +5,12 @@ Vision system for orientation-driven paprika placement. One question per fruit:
 on?**
 
 Fresh project, but not from scratch — the camera handling, logging, config
-loading, per-user maintenance login, database/JSONL result writing and the PLC
-trigger server are carried over from VisionSoftwareMDE, because they were the
-parts that had already been debugged against real hardware. What was left
-behind: OCR (Paddle/Tesseract/text locator), the classifier and template
-backends, and the Roboflow workflow path — none of it applies here, and
-carrying it would have meant maintaining dead branches.
+loading, database/JSONL result writing and the PLC trigger server are carried
+over from VisionSoftwareMDE, because they were the parts that had already been
+debugged against real hardware. What was left behind: OCR (Paddle/Tesseract/text
+locator), the classifier and template backends, the Roboflow workflow path,
+and the per-user maintenance login — none of it applies here, and carrying it
+would have meant maintaining dead branches.
 
 ---
 
@@ -78,7 +78,6 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-python -m tools.manage_users add <username>    # maintenance login
 python -m backend.main
 ```
 
@@ -178,7 +177,7 @@ backend/
     vision.py            cycle entry point
     state.py             thread-safe shared state
     tcp_trigger_server.py  carried over, structured angle response added
-    auth.py / db.py      carried over
+    db.py                 carried over
   detection/paprika/
     orientation.py       THE CORE - keypoints, shape analysis, fusion, pose classes
     pose_detector.py     the three backends
@@ -188,7 +187,6 @@ frontend/                FastAPI + HMI (angle dial, confidence meters)
 tools/
   dataset_check.py       validate an export before training
   tune_shape.py          calibrate saturation_floor against the real belt
-  manage_users.py        carried over
 docs/ANNOTATION_SPEC.md  read this before labelling
 ```
 

@@ -14,7 +14,6 @@
   <h1>Paprika orientation</h1>
   <div class="topbar-right">
     <span id="machineId" class="machine-id">—</span>
-    <span id="modeBadge" class="badge badge-production">Production</span>
   </div>
 </header>
 
@@ -25,13 +24,16 @@
     <div id="cameraDown" class="feed-overlay" hidden>Camera disconnected — reconnecting…</div>
 
     <div class="feed-controls">
-      <span id="sourceControls" hidden>
-        <button id="prevBtn" class="ctrl" disabled>&#8592;</button>
-        <button id="holdBtn" class="ctrl" disabled>Hold</button>
-        <button id="nextBtn" class="ctrl" disabled>&#8594;</button>
-      </span>
-      <button id="overlayBtn" class="ctrl" disabled>Pause overlay</button>
-      <button id="rotateBtn" class="ctrl" disabled>Rotate 90°</button>
+      <div id="sourceControls" class="ctrl-group" hidden>
+        <button id="prevBtn" class="ctrl">&#8592;</button>
+        <button id="holdBtn" class="ctrl">Hold</button>
+        <button id="nextBtn" class="ctrl">&#8594;</button>
+      </div>
+      <div class="ctrl-group">
+        <button id="overlayBtn" class="ctrl">Pause overlay</button>
+        <button id="rotateBtn" class="ctrl">Rotate 90°</button>
+        <button id="resetBtn" class="ctrl">Reset counters</button>
+      </div>
       <span class="legend">
         <span class="dot dot-place"></span>place
         <span class="dot dot-reorient"></span>reorient
@@ -81,28 +83,8 @@
       <div class="counter"><span id="cntTotal">0</span><label>Total</label></div>
     </section>
 
-    <section class="actions">
-      <button id="resetBtn" class="ctrl" disabled>Reset counters</button>
-      <button id="maintBtn" class="ctrl ctrl-primary">Maintenance</button>
-    </section>
-
   </aside>
 </main>
-
-<div id="loginDialog" class="dialog-backdrop" hidden>
-  <form class="dialog" id="loginForm">
-    <h2>Maintenance access</h2>
-    <label for="loginUser">Username</label>
-    <input id="loginUser" type="text" autocomplete="username" required>
-    <label for="loginPass">Password</label>
-    <input id="loginPass" type="password" autocomplete="current-password" required>
-    <p id="loginError" class="dialog-error" hidden></p>
-    <div class="dialog-actions">
-      <button type="button" id="loginCancel" class="ctrl">Cancel</button>
-      <button type="submit" class="ctrl ctrl-primary">Sign in</button>
-    </div>
-  </form>
-</div>
 
 <div id="toast" class="toast" hidden></div>
 
