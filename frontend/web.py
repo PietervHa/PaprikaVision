@@ -16,12 +16,11 @@ worth more than the sharper text.
 
 from __future__ import annotations
 
-import secrets
 import time
 from pathlib import Path
 
 import cv2
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -39,12 +38,6 @@ log = get_logger(__name__)
 
 class VisionModeBody(BaseModel):
     vision_mode: str = ""
-
-
-class MaintenanceBody(BaseModel):
-    maintenance_mode: bool = False
-    username: str = ""
-    password: str = ""
 
 
 def create_app(camera, app_state) -> FastAPI:
@@ -99,12 +92,6 @@ def create_app(camera, app_state) -> FastAPI:
         "Cache-Control": "no-store, no-cache, must-revalidate",
         "Pragma": "no-cache",
     }
-
-    def _is_maintenance_access(request: Request) -> bool:
-        if not app_state.get_maintenance_mode():
-            return False
-        token = request.cookies.get("maintenance_session", "")
-        return bool(token) and token == app_state.get_maintenance_session_token()
 
     # ------------------------------------------------------------------ stream
 
@@ -219,38 +206,29 @@ def create_app(camera, app_state) -> FastAPI:
         return camera.status()
 
     @app.post("/source/next")
-    def source_next(request: Request):
+    def source_next():
         if not is_folder:
             return JSONResponse(status_code=400, content={"error": "not a file source"})
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"success": False})
         return {"success": True, "name": camera.next(), **camera.status()}
 
     @app.post("/source/previous")
-    def source_previous(request: Request):
+    def source_previous():
         if not is_folder:
             return JSONResponse(status_code=400, content={"error": "not a file source"})
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"success": False})
         return {"success": True, "name": camera.previous(), **camera.status()}
 
     @app.post("/source/hold")
-    def source_hold(request: Request):
+    def source_hold():
         if not is_folder:
             return JSONResponse(status_code=400, content={"error": "not a file source"})
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"success": False})
         held = camera.set_hold(not camera.status()["hold"])
         return {"success": True, "hold": held, **camera.status()}
 
     @app.get("/status")
-    def get_status(request: Request, response: Response):
+    def get_status(response: Response):
         response.headers.update(_NO_STORE_HEADERS)
-        is_maintenance = _is_maintenance_access(request)
         return {
             "vision_mode": app_state.get_vision_mode(),
-            "maintenance_mode": is_maintenance,
-            "username": app_state.get_maintenance_session_user() if is_maintenance else None,
             "machine_id": cfg.get("machine_id", ""),
             "engine": engine.status() if engine else {},
             "overlay": overlay.status(),
@@ -276,31 +254,24 @@ def create_app(camera, app_state) -> FastAPI:
         }
 
     @app.post("/vision_mode")
-    def set_vision_mode(body: VisionModeBody, request: Request):
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"success": False})
+    def set_vision_mode(body: VisionModeBody):
         app_state.set_vision_mode(body.vision_mode.strip().lower())
         return {"success": True, "vision_mode": app_state.get_vision_mode()}
 
     @app.post("/overlay/toggle")
-    def toggle_overlay(request: Request):
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"success": False})
+    def toggle_overlay():
         running = overlay.toggle()
         return {"success": True, "running": running}
 
     @app.post("/camera_rotation")
-    def rotate_camera(request: Request):
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"success": False})
+    def rotate_camera():
         app_state.rotate_camera()
         rotation = app_state.get_camera_rotation()
         belt_crop.invalidate()
         # Rotation is applied inside Camera before the engine ever sees a frame,
         # so every reported angle shifts with it. That is fine while framing the
         # camera and actively wrong if it happens after the PLC offset has been
-        # commissioned - hence the log line, and hence this staying gated behind
-        # maintenance mode.
+        # commissioned - hence the log line.
         if rotation:
             log.warning(
                 "Camera rotation set to %d x 90deg - all reported angles are now "
@@ -314,87 +285,8 @@ def create_app(camera, app_state) -> FastAPI:
         }
 
     @app.post("/reset_counters")
-    def reset_counters(request: Request):
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"success": False})
+    def reset_counters():
         app_state.reset_counters()
         return {"success": True}
-
-    @app.post("/maintenance_mode")
-    def set_maintenance(body: MaintenanceBody, request: Request, response: Response):
-        """Per-user maintenance login, carried over unchanged in behaviour.
-
-        The lockout logic is worth keeping verbatim rather than simplifying:
-        an unknown username still pays for a scrypt hash so it takes about as
-        long as a real one, and it can never accumulate strikes, so only
-        failures against an account that actually exists can lock anything.
-        """
-        from backend.core import auth
-
-        if not body.maintenance_mode:
-            app_state.set_maintenance_mode(False)
-            app_state.set_maintenance_session_token("")
-            app_state.set_maintenance_session_user("")
-            response.delete_cookie("maintenance_session", path="/")
-            return {"maintenance_mode": False}
-
-        username = body.username.strip()
-        client_ip = request.client.host if request.client else None
-
-        user = db.get_user(username) if username else None
-        if user is None:
-            auth.verify_password(body.password, auth.DUMMY_PASSWORD_HASH)
-            db.record_login(username or "(empty)", False, client_ip)
-            return JSONResponse(
-                status_code=403,
-                content={"error": "unknown_user", "message": "No account exists for that username."},
-            )
-
-        recent_failures = db.get_recent_failures_since_last_success(
-            username, limit=auth.MAX_FAILED_ATTEMPTS
-        )
-        unlock_at = auth.lockout_until(recent_failures)
-        if unlock_at is not None:
-            db.record_login(username, False, client_ip)
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "error": "locked_out",
-                    "message": (
-                        "Account locked after repeated failed attempts. "
-                        f"Try again after {unlock_at.strftime('%H:%M:%S')}."
-                    ),
-                    "locked_until": unlock_at.isoformat(),
-                },
-            )
-
-        password_ok = auth.verify_password(body.password, user["password_hash"])
-        db.record_login(username, password_ok, client_ip)
-
-        if not password_ok:
-            return JSONResponse(
-                status_code=403,
-                content={"error": "invalid_password", "message": "Incorrect password."},
-            )
-
-        session_token = secrets.token_urlsafe(24)
-        app_state.set_maintenance_mode(True)
-        app_state.set_maintenance_session_token(session_token)
-        app_state.set_maintenance_session_user(username)
-        response.set_cookie(
-            "maintenance_session",
-            session_token,
-            httponly=True,
-            samesite="lax",
-            max_age=60 * 30,
-            path="/",
-        )
-        return {"maintenance_mode": True, "username": username}
-
-    @app.get("/login_log")
-    def login_log(request: Request):
-        if not _is_maintenance_access(request):
-            return JSONResponse(status_code=403, content={"error": "Not in maintenance mode"})
-        return {"logins": db.get_recent_logins(limit=20)}
 
     return app
