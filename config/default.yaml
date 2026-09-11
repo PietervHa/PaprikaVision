@@ -206,6 +206,37 @@ paprika:
     # wrong can reach the actuator.
     reorient_stem_not_found: true
 
+    # End-on detection for stemless fruit: is the camera looking down the
+    # fruit's axis (blossom scar or calyx facing it - standing or upside down),
+    # or at its side with the stem merely hidden?
+    #
+    # A blokpaprika is round in outline from every direction, so elongation
+    # cannot answer this - it scores AUC 0.685, barely better than a coin, and
+    # an earlier revision decided it on exactly that. The classifier in
+    # backend/detection/paprika/end_on.py reads surface texture at the centre
+    # of the silhouette, groove alignment and convexity instead: AUC 0.927 over
+    # 254 hand-labelled crops, 0.872 leave-one-session-out.
+    #
+    # detect_end_on   run it and record the verdict in the notes.
+    # end_on_decides  ALSO act on it, turning a confident end-on fruit from
+    #                 stem_not_found (reorient) into upside_down (reject).
+    #
+    # Shipped reporting-only. 0.872 is well short of good enough to bin fruit
+    # on, and the fit comes from six sessions of one line, so it will be
+    # somewhat optimistic on a different week's crop. Leave end_on_decides off
+    # until your own logs say the flag is trustworthy - it costs nothing to
+    # gather that evidence, and everything to assume it.
+    detect_end_on: true
+    end_on_decides: false
+
+    # Above this probability a fruit is called end-on. Measured
+    # leave-one-session-out: 0.45 finds 26 of 57 end-on fruit and mislabels 5
+    # of 197 side-on ones; 0.35 finds 32 but mislabels 16. Precision is the
+    # side worth protecting - a side-on fruit called end-on is a good fruit
+    # accused of being unpickable. Under half the end-on fruit are caught
+    # either way, so an unflagged fruit means nothing.
+    end_on_threshold: 0.45
+
     # Maximum movement of the stem direction, in degrees, when the same fruit
     # is re-detected under an 8% lighting change. Above this the fruit is sent
     # for reorientation instead of placed.

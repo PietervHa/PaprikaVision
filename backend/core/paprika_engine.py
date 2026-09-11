@@ -43,6 +43,7 @@ from typing import Optional
 
 import numpy as np
 
+from backend.detection.paprika import end_on as end_on_model
 from backend.detection.paprika import orientation as orient
 from backend.detection.paprika.orientation import Keypoint, Orientation
 from backend.detection.paprika.pose_detector import PaprikaDetector
@@ -155,6 +156,18 @@ class PaprikaEngine:
         # most of the crop.
         self._reorient_stem_not_found = bool(
             policy.get("reorient_stem_not_found", True)
+        )
+        # Label-only for now, on purpose. The classifier is measured at AUC
+        # 0.872 leave-one-session-out, which is far better than chance and
+        # nowhere near good enough to bin fruit on. Running it in report mode
+        # lets it accumulate field evidence about its own accuracy without
+        # having cost a single fruit if it turns out to be optimistic - and it
+        # will be somewhat optimistic, because it was fitted on six sessions of
+        # one line. Set end_on_decides once the logs say it has earned it.
+        self._detect_end_on = bool(policy.get("detect_end_on", True))
+        self._end_on_decides = bool(policy.get("end_on_decides", False))
+        self._end_on_threshold = float(
+            policy.get("end_on_threshold", end_on_model.DEFAULT_END_ON_THRESHOLD)
         )
         # Maximum measured movement of the stem direction under a lighting
         # change before the fruit is sent round again instead of placed.
@@ -302,6 +315,43 @@ class PaprikaEngine:
 
         return None, []
 
+    def _end_on_verdict(
+        self, frame: np.ndarray, bbox, pose: str
+    ) -> tuple[str, list[str]]:
+        """Is this stemless fruit end-on? Reported always, acted on only if asked.
+
+        Returns the pose to record and any notes. With end_on_decides off - the
+        default - the pose is returned unchanged and only a note is added, so
+        the classifier's opinion lands in the results and the logs while every
+        placement stays exactly where it was.
+        """
+        if not self._detect_end_on or frame is None:
+            return pose, []
+        mask = orient.segment_fruit(
+            frame, bbox, saturation_floor=self._saturation_floor, belt_hue=self._belt_hue
+        )
+        if mask is None:
+            return pose, []
+        probability = end_on_model.end_on_probability(
+            frame[bbox[1]:bbox[3], bbox[0]:bbox[2]], mask
+        )
+        if probability is None:
+            # Unreadable is not "side-on". Say nothing rather than imply an
+            # answer that was never computed.
+            return pose, ["end_on=unreadable"]
+
+        notes = [f"end_on_p={probability:.2f}"]
+        if probability <= self._end_on_threshold:
+            return pose, notes
+
+        notes.append("end_on_detected")
+        if not self._end_on_decides:
+            # Reporting only: the fruit still goes wherever stem_not_found
+            # sends it. Below half the end-on fruit are caught at this
+            # threshold, so a fruit NOT flagged means nothing either way.
+            return pose, notes
+        return orient.POSE_UPSIDE_DOWN, notes
+
     def _evaluate_one(self, frame: np.ndarray, detection: dict) -> dict:
         bbox = detection["bbox"]
         landmarks: dict = detection.get("keypoints") or {}
@@ -337,6 +387,9 @@ class PaprikaEngine:
 
         if reason and result is None:
             pose = _UNPICKABLE_POSES.get(reason, orient.POSE_UPSIDE_DOWN)
+            if pose == orient.POSE_STEM_NOT_FOUND:
+                pose, extra = self._end_on_verdict(frame, bbox, pose)
+                fallback_notes = [*fallback_notes, *extra]
             unusable = Orientation(
                 source="classical",
                 pose=pose,
