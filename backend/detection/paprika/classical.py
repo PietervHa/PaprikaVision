@@ -299,6 +299,13 @@ class ClassicalFruit:
     stem_quality: float = 0.0
     # Measured angular movement of the stem direction under a lighting change.
     stem_spread_deg: float = 0.0
+    # Stem mask area as a fraction of the fruit's own area. Small means the
+    # "stem" is a speck - a highlight, a fleck of belt dirt, a green blemish -
+    # rather than a calyx. Measured over 265 hue stems: median 0.040, 5th
+    # percentile 0.0054. Four fruit that were being placed at a guessed angle
+    # while lying blossom-up scored 0.0034 to 0.0127. Carried forward so the
+    # policy can decline to trust a stem it can barely see.
+    stem_area_ratio: float = 0.0
     standing: bool = False
     edge_clipped: bool = False
     # Why no coordinates can be derived here. Empty means the fruit is usable.
@@ -1203,10 +1210,16 @@ def find_fruit(
             if stem_mask is not None:
                 fruit.stem_method = "hue"
                 fruit.stem_quality = STEM_QUALITY_HUE
+                fruit.stem_area_ratio = float(
+                    int((stem_mask > 0).sum()) / max(1, int((blob > 0).sum()))
+                )
         if stem_mask is None:
             stem_mask, quality = _stem_by_morphology(blob)
             if stem_mask is not None:
                 fruit.stem_method = "morphology"
+                fruit.stem_area_ratio = float(
+                    int((stem_mask > 0).sum()) / max(1, int((blob > 0).sum()))
+                )
                 stem_mask = _refine_stem_by_saturation(stem_mask, blob, hsv[:, :, 1])
 
                 # Only for stems found by shape, and only on fruit that could

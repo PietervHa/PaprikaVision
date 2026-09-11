@@ -68,6 +68,12 @@ DEFAULT_END_ON_THRESHOLD = 0.45
 # anything - the erosion leaves nothing to measure.
 _MIN_MASK_PX = 2000
 
+# Minimum surface contrast, as the 95th-percentile gradient over mean
+# brightness, before groove direction is believed at all. Labelled fruit run
+# 3 to 6; a flat synthetic disc runs near zero yet still produces a confident-
+# looking coherence, so the floor has to be absolute rather than relative.
+MIN_GROOVE_CONTRAST = 1.5
+
 
 def _interior(mask: np.ndarray) -> np.ndarray:
     """Mask eroded away from its own edge.
@@ -163,6 +169,63 @@ def features(crop_bgr: np.ndarray, mask: np.ndarray) -> Optional[dict]:
         "solidity": _solidity(mask),
         "par": par,
     }
+
+
+def groove_axis(crop_bgr: np.ndarray, mask: np.ndarray) -> Optional[tuple]:
+    """The fruit's long axis read from its surface grooves, not its outline.
+
+    A pepper's grooves run stem to blossom, so seen from the side they cross
+    the fruit as parallel bands and their shared direction IS the axis. This
+    matters because the outline cannot supply it: a blokpaprika lying on its
+    side measures around 1.07 elongation, and the principal axis of a shape
+    that round is numerically meaningless - it swings wildly on a few pixels of
+    noise.
+
+    Checked against the silhouette axis on 113 labelled side-on crops: median
+    disagreement 13 degrees overall, and 4.2 degrees on the 42 elongated enough
+    for the silhouette axis to be trustworthy, with 38 of those 42 inside 20
+    degrees. Where both can be measured they agree; where only one can, this is
+    the one.
+
+    Returns (axis_deg, coherence) with the axis in 0-180 - an ORIENTATION, not
+    a direction. Which end carries the stem is not knowable from grooves, and
+    pretending otherwise is how a fruit gets placed backwards. Coherence is how
+    aligned the grooves were; on a smooth fruit with no visible grooves it
+    collapses toward zero and the axis means nothing.
+    """
+    if crop_bgr is None or mask is None or mask.shape[:2] != crop_bgr.shape[:2]:
+        return None
+    grey = cv2.GaussianBlur(
+        cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32), (7, 7), 0
+    )
+    interior = _interior(mask)
+    if interior.sum() < 300:
+        return None
+    gx = cv2.Sobel(grey, cv2.CV_32F, 1, 0, ksize=5)
+    gy = cv2.Sobel(grey, cv2.CV_32F, 0, 1, ksize=5)
+    magnitude = np.hypot(gx, gy)[interior]
+    angle = np.arctan2(gy[interior], gx[interior])
+    # There must be grooves to read before their direction means anything.
+    # Coherence is a RATIO, so it stays high on a surface with no texture at
+    # all: on a flat drawn disc the 75th-percentile cut selects antialiasing
+    # noise and the doubled-angle resultant comes back at 0.54, indistinguishable
+    # from a deeply grooved pepper. Real fruit measure 3 to 6 here; anything
+    # near zero has nothing to say and must decline rather than report the
+    # direction of its own noise.
+    contrast = float(np.percentile(magnitude, 95) / max(1.0, grey[interior].mean()))
+    if contrast < MIN_GROOVE_CONTRAST:
+        return None
+    strong = magnitude > np.percentile(magnitude, 75)
+    if strong.sum() < 80:
+        return None
+    weights, angles = magnitude[strong], angle[strong]
+    cos2 = (weights * np.cos(2 * angles)).sum()
+    sin2 = (weights * np.sin(2 * angles)).sum()
+    coherence = float(np.hypot(cos2, sin2) / weights.sum())
+    # The gradient runs ACROSS a groove, so the groove itself - and the axis -
+    # is the perpendicular.
+    axis = float((math.degrees(0.5 * math.atan2(sin2, cos2)) + 90.0) % 180.0)
+    return axis, coherence
 
 
 def score(measured: dict) -> float:

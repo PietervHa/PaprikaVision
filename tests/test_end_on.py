@@ -131,3 +131,77 @@ def test_it_does_decide_when_switched_on(monkeypatch):
     pose, _ = engine._end_on_verdict(np.zeros((10, 10, 3), np.uint8), (0, 0, 5, 5),
                                      orient.POSE_STEM_NOT_FOUND)
     assert pose == orient.POSE_UPSIDE_DOWN
+
+
+def test_groove_axis_refuses_a_textureless_fruit():
+    """The trap that a relative measure walks into.
+
+    Coherence is a ratio, so a surface with no grooves at all still scores
+    highly: on a flat drawn disc the percentile cut selects antialiasing noise
+    and the doubled-angle resultant came back at 0.54, indistinguishable from a
+    deeply grooved pepper. An absolute contrast floor is what separates "the
+    grooves all run this way" from "there are no grooves".
+    """
+    crop, mask = _disc()
+    assert end_on.groove_axis(crop, mask) is None
+
+
+def _ripple(crop, size, horizontal=True):
+    """Soft parallel bands, the way a lobed surface actually shades.
+
+    Hard-drawn lines are no good here: they saturate the Sobel response, so a
+    quarter of the pixels share the maximum value and the percentile cut
+    selects nothing at all. Real fruit shade continuously.
+    """
+    axis = np.arange(size, dtype=np.float32)
+    wave = (np.sin(axis / 6.0) * 40).astype(np.int16)
+    band = wave[:, None] if horizontal else wave[None, :]
+    shaded = np.clip(crop.astype(np.int16) + band[..., None], 0, 255)
+    crop[:] = shaded.astype(np.uint8)
+
+
+def test_groove_axis_reads_parallel_bands():
+    crop, mask = _disc(texture=lambda c, s: _ripple(c, s, horizontal=True))
+    measured = end_on.groove_axis(crop, mask)
+    assert measured is not None
+    axis, coherence = measured
+    # Horizontal bands, so the axis they define is horizontal: 0 or 180.
+    assert min(abs(axis - 0.0), abs(axis - 180.0)) < 15.0
+    assert coherence > 0.5
+
+
+def test_groove_axis_is_an_orientation_not_a_direction():
+    """0-180 only. Which end carries the stem is not knowable from grooves,
+    and a function that returned 0-360 would invite a caller to believe it."""
+    axis, _ = end_on.groove_axis(
+        *_disc(texture=lambda c, s: _ripple(c, s, horizontal=True))
+    )
+    assert 0.0 <= axis < 180.0
+
+
+def test_groove_estimate_claims_no_flip_confidence():
+    """The guarantee that stops a groove axis being placed on a coin toss."""
+    from backend.core.paprika_engine import PaprikaEngine
+    block = {
+        "backend": "shape", "stemless_shape_fallback": False,
+        "shape": {"saturation_floor": 80, "belt_hue": [96, 145], "value_floor": 45,
+                  "min_area_px": 3000, "max_area_ratio": 0.7},
+        "policy": {"min_angle_confidence": 0.45, "min_flip_confidence": 0.40},
+        "frame": {"angle_offset_deg": 0.0, "angle_invert": False},
+    }
+    engine = PaprikaEngine({"paprika": block})
+    import numpy as np
+    from backend.detection.paprika import end_on as module, orientation as orient
+    import pytest as _pytest
+    original = module.groove_axis
+    module.groove_axis = lambda *a, **k: (42.0, 0.9)
+    orig_seg = orient.segment_fruit
+    orient.segment_fruit = lambda *a, **k: np.ones((5, 5), np.uint8) * 255
+    try:
+        result = engine._groove_axis_estimate(np.zeros((10, 10, 3), np.uint8), (0, 0, 5, 5))
+    finally:
+        module.groove_axis = original
+        orient.segment_fruit = orig_seg
+    assert result is not None
+    assert result.angle_deg == 42.0
+    assert result.flip_confidence == 0.0, "a groove axis must never claim a stem end"

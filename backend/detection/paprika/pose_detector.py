@@ -225,6 +225,7 @@ class PaprikaDetector:
                     "keypoints": landmarks,
                     "area_px": fruit.area,
                     "stem_method": fruit.stem_method,
+                "stem_area_ratio": float(fruit.stem_area_ratio),
                     "stem_quality": round(float(fruit.stem_quality or 0.0), 3),
                     "stem_spread_deg": float(fruit.stem_spread_deg or 0.0),
                     "colour": fruit.colour,

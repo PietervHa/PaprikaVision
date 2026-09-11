@@ -169,6 +169,17 @@ class PaprikaEngine:
         self._end_on_threshold = float(
             policy.get("end_on_threshold", end_on_model.DEFAULT_END_ON_THRESHOLD)
         )
+        # A stem smaller than this fraction of the fruit is a speck, not a
+        # calyx, and the end-on classifier is consulted instead of trusting it.
+        # The classifier CANNOT be applied to fruit with a solid stem: fitted
+        # on stemless crops, it scores normal stemmed fruit 0.84-0.98, higher
+        # than the fruit it is meant to catch. Restricting it to fruit whose
+        # stem evidence is thin keeps it on the population it was measured on.
+        self._min_stem_area_ratio = float(policy.get("min_stem_area_ratio", 0.015))
+        # Give a stemless fruit that is clearly NOT end-on an axis read from
+        # its grooves, instead of refusing to answer at all.
+        self._groove_axis_fallback = bool(policy.get("groove_axis_fallback", True))
+        self._min_groove_coherence = float(policy.get("min_groove_coherence", 0.35))
         # Maximum measured movement of the stem direction under a lighting
         # change before the fruit is sent round again instead of placed.
         self._max_stem_spread_deg = float(policy.get("max_stem_spread_deg", 6.0))
@@ -315,6 +326,61 @@ class PaprikaEngine:
 
         return None, []
 
+    def _end_on_probability(self, frame, bbox) -> Optional[float]:
+        """P(looking down this fruit's axis), or None when it cannot be read."""
+        if frame is None:
+            return None
+        mask = orient.segment_fruit(
+            frame, bbox, saturation_floor=self._saturation_floor, belt_hue=self._belt_hue
+        )
+        if mask is None:
+            return None
+        return end_on_model.end_on_probability(
+            frame[bbox[1]:bbox[3], bbox[0]:bbox[2]], mask
+        )
+
+    def _groove_axis_estimate(self, frame, bbox) -> Optional[Orientation]:
+        """An axis for a stemless fruit that is clearly lying on its side.
+
+        The outline cannot give it - a blokpaprika on its side measures about
+        1.07 elongation and the principal axis of a shape that round is noise.
+        The grooves can: they run stem to blossom, so side-on they cross the
+        fruit as parallel bands whose shared direction is the axis.
+
+        flip_confidence is left at zero on purpose. Grooves give an
+        ORIENTATION, not a direction - both ends look alike, and nothing here
+        establishes which one carries the stem. The angle is reported so the
+        operator and the log can see it, and the existing flip policy sends the
+        fruit for another look rather than placing it on a coin toss.
+        """
+        if not self._groove_axis_fallback or frame is None:
+            return None
+        mask = orient.segment_fruit(
+            frame, bbox, saturation_floor=self._saturation_floor, belt_hue=self._belt_hue
+        )
+        if mask is None:
+            return None
+        measured = end_on_model.groove_axis(
+            frame[bbox[1]:bbox[3], bbox[0]:bbox[2]], mask
+        )
+        if measured is None:
+            return None
+        axis, coherence = measured
+        if coherence < self._min_groove_coherence:
+            # A smooth fruit with no readable grooves. The axis would be the
+            # direction of whatever noise happened to be strongest.
+            return None
+        return Orientation(
+            source="grooves",
+            pose=orient.POSE_LYING,
+            angle_deg=axis,
+            axis_deg=axis,
+            stem_present=False,
+            confidence=float(coherence),
+            flip_confidence=0.0,
+            notes=[f"groove_axis coherence={coherence:.2f}", "stem_end_unknown"],
+        )
+
     def _end_on_verdict(
         self, frame: np.ndarray, bbox, pose: str
     ) -> tuple[str, list[str]]:
@@ -369,12 +435,45 @@ class PaprikaEngine:
         # purpose: even a good estimate would not help the robot, because it
         # cannot pick up an upside-down fruit and turn it over. Returning a
         # number would imply an action that does not exist.
+        # A "stem" too small to be a calyx is not evidence. Where the stem is
+        # marginal AND the silhouette says the camera is looking down the
+        # fruit's axis, the speck is discarded and the fruit is handled as
+        # what it actually is: stemless, and pointing at the lens.
+        #
+        # Both halves are load-bearing. Size alone would need a 1.3% threshold
+        # to catch all four known cases and would cost 24 of 239 placements.
+        # The classifier alone cannot be used here at all - fitted on stemless
+        # crops, it scores ordinary stemmed fruit 0.84-0.98, ABOVE the fruit it
+        # is meant to catch. Together they fire on 5 of 239 placed fruit, four
+        # of which are the four being placed at a guessed angle while lying
+        # blossom-up.
         reason = str(detection.get("unpickable_reason") or "")
+        endon_note: list[str] = []
+        if (
+            self._detect_end_on
+            and not reason
+            and detection.get("keypoints")
+            and float(detection.get("stem_area_ratio", 0.0) or 0.0)
+                < self._min_stem_area_ratio
+        ):
+            probability = self._end_on_probability(frame, bbox)
+            if probability is not None:
+                endon_note = [f"end_on_p={probability:.2f}"]
+                if probability > self._end_on_threshold:
+                    endon_note.append("stem_speck_rejected")
+                    detection = {
+                        **detection,
+                        "keypoints": {},
+                        "stem_method": "none",
+                        "unpickable_reason": "no_stem",
+                    }
+                    reason = "no_stem"
+
         result: Optional[Orientation] = None
         # Diagnostics from the shape fallback survive even when it declines to
         # produce an orientation - "I looked and the silhouette was round" is
         # a different record from "I never looked".
-        fallback_notes: list[str] = []
+        fallback_notes: list[str] = list(endon_note)
 
         if reason == "no_stem" and self._stemless_shape_fallback:
             # No stem found, but the fruit is fully in frame. Before writing
@@ -385,11 +484,34 @@ class PaprikaEngine:
             # guessed at.
             result, fallback_notes = self._shape_only_estimate(frame, bbox)
 
+        # Decided BEFORE the unpickable branch below, because that branch
+        # commits to a verdict and returns. An earlier revision set `result`
+        # from inside it and the assignment simply had no effect - the fruit
+        # was already on its way out as unmeasurable.
+        if reason == "no_stem" and result is None:
+            looks_end_on, extra = self._end_on_verdict(
+                frame, bbox, orient.POSE_STEM_NOT_FOUND
+            )
+            fallback_notes = [*fallback_notes, *extra]
+            if looks_end_on == orient.POSE_STEM_NOT_FOUND:
+                # Not end-on and no stem: the fruit IS lying there with a
+                # measurable axis, so measure it rather than reporting nothing.
+                # An orientation with no flip still beats no orientation - the
+                # operator sees where it lies, and the flip policy decides what
+                # to do about the end nobody can identify.
+                from_grooves = self._groove_axis_estimate(frame, bbox)
+                if from_grooves is not None:
+                    from_grooves.notes.extend(fallback_notes)
+                    result = from_grooves
+                    reason = ""
+            else:
+                reason = reason or "no_stem"
+                fallback_notes = [*fallback_notes]
+
         if reason and result is None:
             pose = _UNPICKABLE_POSES.get(reason, orient.POSE_UPSIDE_DOWN)
-            if pose == orient.POSE_STEM_NOT_FOUND:
-                pose, extra = self._end_on_verdict(frame, bbox, pose)
-                fallback_notes = [*fallback_notes, *extra]
+            if pose == orient.POSE_STEM_NOT_FOUND and self._end_on_decides:
+                pose, _ = self._end_on_verdict(frame, bbox, pose)
             unusable = Orientation(
                 source="classical",
                 pose=pose,

@@ -237,6 +237,33 @@ paprika:
     # either way, so an unflagged fruit means nothing.
     end_on_threshold: 0.45
 
+    # A hue "stem" smaller than this fraction of the fruit is a speck - a
+    # highlight, a fleck of belt dirt, a green blemish - not a calyx. Over 265
+    # real hue stems the median is 0.040 and the 5th percentile 0.0054; four
+    # fruit being placed at a guessed angle while lying blossom-up scored
+    # 0.0034 to 0.0127.
+    #
+    # Size alone is not enough to act on: catching all four needs 0.013, which
+    # costs 24 of 239 placements. Below this threshold the end-on classifier is
+    # consulted as well, and only fruit failing BOTH tests lose their stem.
+    # That pair fires on 5 of 239, four of them the known bad ones.
+    min_stem_area_ratio: 0.015
+
+    # A stemless fruit that is clearly not end-on is lying there with a real
+    # axis, so read it from the grooves rather than reporting nothing. The
+    # outline cannot supply it - side-on a blokpaprika measures about 1.07
+    # elongation and the principal axis of a shape that round is noise. Checked
+    # against the silhouette axis on 113 labelled side-on crops: 4.2 degrees
+    # median disagreement where the outline was trustworthy enough to compare.
+    #
+    # No flip is claimed. Grooves give an orientation, not a direction, so the
+    # fruit still goes for another look instead of being placed on a coin toss.
+    groove_axis_fallback: true
+    # Below this the grooves are too faint to read and the axis would be the
+    # direction of whatever noise was strongest. Labelled side-on fruit run
+    # 0.59-0.63; end-on fruit, where the grooves converge and cancel, 0.09-0.20.
+    min_groove_coherence: 0.35
+
     # Maximum movement of the stem direction, in degrees, when the same fruit
     # is re-detected under an 8% lighting change. Above this the fruit is sent
     # for reorientation instead of placed.
