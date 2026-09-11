@@ -275,6 +275,7 @@ def _engine(**overrides):
     block = {
         "backend": "shape",
         "shape_crosscheck": False,
+        "stemless_shape_fallback": True,
         "shape": {
             "saturation_floor": 80,
             "belt_hue": [96, 145],
@@ -290,7 +291,14 @@ def _engine(**overrides):
         "frame": {"angle_offset_deg": 0.0, "angle_invert": False},
         "primary_rule": "largest",
     }
-    block.update(overrides)
+    # Merge the nested blocks rather than replacing them: _engine(policy={...})
+    # should override one policy key, not silently drop the other four and
+    # leave the engine running on its own defaults.
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(block.get(key), dict):
+            block[key] = {**block[key], **value}
+        else:
+            block[key] = value
     return PaprikaEngine({"paprika": block})
 
 
@@ -304,33 +312,113 @@ def test_engine_places_a_clear_fruit():
     assert orient.angular_difference(primary["angle_plc"], 25) < 5.0
 
 
-def test_stemless_fruit_is_reported_stem_not_found_not_upside_down():
-    """No stem findable on a fully visible fruit is recorded as its own state.
+def test_round_stemless_fruit_is_reported_stem_not_found_not_standing():
+    """A round, stemless silhouette says "no stem found", not "standing".
 
-    It used to be reported as `upside_down`, which asserts something the
-    backend never established: that the fruit is lying blossom-up. All it
-    really knows is that it could not find a stem. Conflating the two makes the
-    upside_down counter unusable as a diagnosis, because a climbing number
-    could equally mean the infeed is tipping fruit or that the stem detector
-    has stopped coping with this cultivar.
+    An earlier revision concluded the opposite: that a round blob with no
+    detectable stem must be standing blossom-up, because a stem pointing at an
+    overhead lens is exactly what the colour and morphology routes are built to
+    catch, so catching nothing proves the stem is underneath.
 
-    The reject decision is deliberately unchanged - this is a reporting split,
-    not a policy change - so the assertions on placement and coordinates are
-    the same ones the old test made.
+    Field measurement does not support that. A blokpaprika is close to a
+    rounded cube, so its outline is round from every direction, not only down
+    the long axis. Across 225 red-fruit frames, 43% of correctly PLACED fruit
+    measured below the same 1.12 roundness line the rule fired on. Two frames
+    settle it: one fruit genuinely blossom-up measured 1.084, and one lying
+    flat on its side with its stem hidden measured 1.073. Roundness cannot
+    separate those, so a pose claimed from it is a coin toss wearing a label.
+
+    The reject is unchanged - a round stemless fruit is unplaceable either way.
+    What changes is that the record now says what was actually established.
+    """
+    image = np.full((400, 400, 3), BELT, np.uint8)
+    cv2.circle(image, (200, 200), 70, COLORS["red"], -1)
+    result = _engine().evaluate(image)
+    primary = result["primary"]
+
+    assert result["status"] == "NOK"
+    # Reorient, not reject: see paprika.policy.reorient_stem_not_found. No
+    # angle is produced either way, so nothing wrong can reach the actuator.
+    assert primary["placement"] == "reorient"
+    assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
+    assert primary["orientation"]["pose"] != orient.POSE_STANDING_STEM_DOWN
+    assert primary["angle_plc"] is None
+    assert primary["orientation"]["angle_deg"] is None
+    assert "no_stem" in primary["orientation"]["notes"]
+
+
+def test_declining_to_guess_still_records_what_was_measured():
+    """Falling through must not look the same as never having looked.
+
+    The roundness measurement is kept on the record, so a result read back
+    later distinguishes "the silhouette was measured and was round" from "the
+    fallback never ran".
+    """
+    image = np.full((400, 400, 3), BELT, np.uint8)
+    cv2.circle(image, (200, 200), 70, COLORS["red"], -1)
+    notes = _engine().evaluate(image)["primary"]["orientation"]["notes"]
+
+    assert any(n.startswith("round_silhouette") for n in notes), notes
+
+
+def test_standing_stemless_fallback_can_be_switched_off():
+    """paprika.stemless_shape_fallback: false restores the plain reject.
+
+    Same image as the test above, fallback disabled. The pose is the same
+    either way now that roundness no longer implies standing; what the switch
+    still controls is whether an ELONGATED stemless fruit gets a silhouette
+    angle at all (the test below), and whether the round case is measured
+    before being rejected.
+    """
+    image = np.full((400, 400, 3), BELT, np.uint8)
+    cv2.circle(image, (200, 200), 70, COLORS["red"], -1)
+    result = _engine(stemless_shape_fallback=False).evaluate(image)
+    primary = result["primary"]
+
+    assert primary["placement"] == "reorient"
+    assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
+    assert primary["orientation"]["angle_deg"] is None
+
+
+def test_lying_stemless_fruit_gets_a_shape_based_angle():
+    """The case paprika.stemless_shape_fallback exists for.
+
+    Stem broke off in the crate, but the fruit is clearly lying on its side -
+    elongated, shoulder wider than tip. Outright rejecting this throws away
+    a perfectly readable silhouette, so it is measured directly instead of
+    being folded into the round-and-standing case above.
     """
     image, _, _ = render_paprika(25, with_stem=False)
     result = _engine().evaluate(image)
     primary = result["primary"]
 
-    assert result["status"] == "NOK"
-    assert primary["placement"] == "reject"
-    assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
-    assert primary["orientation"]["pose"] != orient.POSE_UPSIDE_DOWN
-    assert primary["angle_plc"] is None
-    assert primary["orientation"]["angle_deg"] is None
-    # The detector's own reason is kept on the record, so a result read back
-    # from the database can still be traced to the branch that produced it.
+    assert primary["orientation"]["pose"] == orient.POSE_LYING
+    assert primary["orientation"]["source"] == "shape_only"
+    assert orient.angular_difference(primary["angle_plc"], 25) < 5.0
+    # Strong, well-tapered synthetic shoulder: confident enough to place, not
+    # just to measure. A weaker real-world taper is expected to land on
+    # "reorient" instead - see the flip-confidence gate this still goes
+    # through, unchanged, in _placement_for().
+    assert primary["placement"] == "place"
+    assert result["status"] == "OK"
+    # Provenance survives onto the record, same as the standing case.
     assert "no_stem" in primary["orientation"]["notes"]
+    assert "shape_fallback" in primary["orientation"]["notes"]
+
+
+def test_stemless_shape_fallback_can_be_switched_off():
+    """paprika.stemless_shape_fallback: false restores the old behaviour.
+
+    A commissioning engineer who finds the fallback guessing wrong on their
+    cultivar needs a config change, not a code change, to turn it off.
+    """
+    image, _, _ = render_paprika(25, with_stem=False)
+    result = _engine(stemless_shape_fallback=False).evaluate(image)
+    primary = result["primary"]
+
+    assert primary["placement"] == "reorient"
+    assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
+    assert primary["orientation"]["angle_deg"] is None
 
 
 def test_stem_not_found_and_upside_down_are_counted_apart():
@@ -355,6 +443,30 @@ def test_stem_not_found_and_upside_down_are_counted_apart():
 
     state.reset_counters()
     assert state.counters["stem_not_found"] == 0
+
+
+def test_standing_poses_are_counted_apart_from_stem_not_found():
+    """standing_stem_up/down get their own counters too, for the same reason.
+
+    A climbing standing_stem_down count means the infeed is landing fruit
+    blossom-up; a climbing stem_not_found count means the stem detector, the
+    lighting, or the cultivar. Folding one into the other at the counter
+    level would silently undo the point of separating them at the pose
+    level above.
+    """
+    from backend.core.state import AppState
+
+    state = AppState()
+    assert state.counters["standing_stem_down"] == 0
+    assert state.counters["standing_stem_up"] == 0
+
+    state.increment_counter("NOK", placement="reject", pose=orient.POSE_STANDING_STEM_DOWN)
+
+    counters = state.get_snapshot()["counters"]
+    assert counters["standing_stem_down"] == 1
+    assert counters["standing_stem_up"] == 0
+    assert counters["stem_not_found"] == 0
+    assert counters["reject"] == 1
 
 
 def test_fruit_running_off_the_frame_is_incomplete_not_stem_not_found():
@@ -528,3 +640,43 @@ def test_labels_stay_ascii_for_opencv():
     image, _, _ = render_paprika(25)
     label = _engine().evaluate(image)["primary"]["label"]
     assert label.isascii(), f"non-ASCII label would render as ?? : {label!r}"
+
+def test_stem_not_found_is_reoriented_not_rejected():
+    """A hidden stem is a fact about the view, not about the fruit.
+
+    upside_down and incomplete are end states - nothing the line can do about
+    them. "No stem found" is different: very often the stem is facing away or
+    tucked underneath and one more pass shows it, so binning the fruit throws
+    away good produce for a limitation of the camera angle. It matters most on
+    green, where _stem_by_hue returns nothing by design and this branch will
+    carry most of the crop.
+
+    Still no angle either way, so nothing wrong can reach the actuator.
+    """
+    image = np.full((400, 400, 3), BELT, np.uint8)
+    cv2.circle(image, (200, 200), 70, COLORS["red"], -1)
+    primary = _engine().evaluate(image)["primary"]
+
+    assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
+    assert primary["placement"] == "reorient"
+    assert primary["angle_plc"] is None
+
+
+def test_reorient_stem_not_found_can_be_switched_off():
+    """A line where a second pass is expensive can still choose to bin it."""
+    image = np.full((400, 400, 3), BELT, np.uint8)
+    cv2.circle(image, (200, 200), 70, COLORS["red"], -1)
+    primary = _engine(policy={"reorient_stem_not_found": False}).evaluate(image)["primary"]
+
+    assert primary["orientation"]["pose"] == orient.POSE_STEM_NOT_FOUND
+    assert primary["placement"] == "reject"
+
+
+def test_upside_down_is_still_rejected():
+    """The switch must not leak into the genuine end states."""
+    from backend.core.paprika_engine import PaprikaEngine, PLACEMENT_REJECT
+    from backend.detection.paprika.orientation import Orientation
+
+    engine = _engine()
+    for pose in (orient.POSE_UPSIDE_DOWN, orient.POSE_INCOMPLETE):
+        assert engine._placement_for(Orientation(pose=pose)) == PLACEMENT_REJECT

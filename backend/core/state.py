@@ -15,9 +15,16 @@ VALID_VISION_MODES = ("paprika", "idle")
 # Poses counted individually, because each points at a different thing to go
 # and fix: upside_down at the infeed, incomplete at the camera framing or the
 # trigger timing, stem_not_found at the stem detector, the lighting or the
-# cultivar. All three are rejected the same way; only the reason differs, and
-# the reason is the whole point of counting them apart.
-COUNTED_POSES = ("upside_down", "stem_not_found", "incomplete")
+# cultivar, standing_stem_up/down at the infeed tipping fruit onto an end
+# instead of its side. All five are rejected the same way; only the reason
+# differs, and the reason is the whole point of counting them apart.
+COUNTED_POSES = (
+    "upside_down",
+    "stem_not_found",
+    "incomplete",
+    "standing_stem_up",
+    "standing_stem_down",
+)
 
 # One definition, used both to initialise and to reset. Two literal dicts is
 # how a counter gets added in one place and then silently resurrects itself

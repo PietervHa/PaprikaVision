@@ -137,6 +137,43 @@ SPLIT_DISTANCE_RATIO = 0.45
 # Hue separation, in OpenCV units, before two regions count as different fruit
 # rather than one fruit and its stem.
 SPLIT_MIN_HUE_SEPARATION = 20
+# Fixed seed for the hue clustering below. cv2.kmeans draws its initial centres
+# from OpenCV's global RNG, and nothing was seeding it, so the SAME blob
+# clustered twice produced different centres, a different measured hue
+# separation, and therefore a different answer to "is this one fruit or two".
+# Measured on a real frame: 25 identical evaluations gave 4 different verdicts,
+# the most common being one paprika placed TWICE at angles 180 degrees apart.
+# Any constant will do; what matters is that detection is a function of the
+# frame and nothing else.
+SPLIT_HUE_RNG_SEED = 0
+# A split part must still look like a paprika. Area and solidity alone let a
+# shadowed lobe through, so elongation is checked too.
+#
+# Calibrated against every split observed over a 1968-frame run, measured on
+# the part masks themselves rather than on a bbox crop:
+#
+#     two touching fruit          1.21 / 1.27      legitimate
+#     two touching fruit          1.26 / 1.35      legitimate
+#     two touching fruit          1.27 / 2.11      legitimate
+#     fruit + clipped neighbour   1.47 / 2.95      legitimate
+#     fruit + its own lobe        1.98 / 3.58      PHANTOM
+#
+# 3.2 sits in the gap. An earlier value of 2.0 looked safe on a seven-frame
+# sample and cost two real placements on the full run - the gap I claimed was
+# empty had two legitimate splits in it. This one is narrow (2.95 to 3.58) and
+# rests on a single phantom, so re-check it when more data arrives rather than
+# trusting it the way the first number was trusted.
+SPLIT_MAX_PART_ELONGATION = 3.2
+
+# Above this, a detection that sits mostly inside a larger one is a piece of
+# that larger one - a shadowed band, a lobe cut off by the saturation floor -
+# rather than a second fruit. Only applied together with a shape test: a whole
+# healthy fruit can legitimately have its box swallowed by a merged blob's box
+# beside it, and dropping that would lose real fruit. See _drop_contained().
+CONTAINED_MIN_OVERLAP = 0.70
+CONTAINED_MAX_AREA_RATIO = 0.50
+CONTAINED_MAX_ELONGATION = 2.5
+CONTAINED_MIN_SOLIDITY = 0.75
 
 # Only blobs that could plausibly hold two fruit are examined at all. A single
 # compact paprika needs no splitting, and attempting it on every blob doubled
@@ -262,6 +299,13 @@ class ClassicalFruit:
     stem_quality: float = 0.0
     # Measured angular movement of the stem direction under a lighting change.
     stem_spread_deg: float = 0.0
+    # Stem mask area as a fraction of the fruit's own area. Small means the
+    # "stem" is a speck - a highlight, a fleck of belt dirt, a green blemish -
+    # rather than a calyx. Measured over 265 hue stems: median 0.040, 5th
+    # percentile 0.0054. Four fruit that were being placed at a guessed angle
+    # while lying blossom-up scored 0.0034 to 0.0127. Carried forward so the
+    # policy can decline to trust a stem it can barely see.
+    stem_area_ratio: float = 0.0
     standing: bool = False
     edge_clipped: bool = False
     # Why no coordinates can be derived here. Empty means the fruit is usable.
@@ -441,16 +485,55 @@ def _solidity(mask: np.ndarray) -> float:
     return float(cv2.contourArea(contour) / max(1.0, cv2.contourArea(hull)))
 
 
+def _elongation(mask: np.ndarray) -> float:
+    """Long-axis over short-axis of the pixel distribution.
+
+    Second central moments rather than minAreaRect: a rectangle is fitted to
+    the extremes and so is dominated by the one stray pixel furthest out, while
+    the moments describe the whole blob. This is the same quantity
+    orientation.shape_orientation reports, so a number here can be compared
+    directly against one from there.
+
+    Returns 1.0 for anything too small or too degenerate to measure, which
+    reads as "perfectly round" and therefore never vetoes a split on its own.
+    """
+    moments = cv2.moments((mask > 0).astype(np.uint8), binaryImage=True)
+    if moments["m00"] <= 0:
+        return 1.0
+    mu20 = moments["mu20"] / moments["m00"]
+    mu02 = moments["mu02"] / moments["m00"]
+    mu11 = moments["mu11"] / moments["m00"]
+    common = math.sqrt(max(0.0, 4.0 * mu11 ** 2 + (mu20 - mu02) ** 2))
+    major = (mu20 + mu02 + common) / 2.0
+    minor = (mu20 + mu02 - common) / 2.0
+    if minor <= 1e-6:
+        return 1.0
+    return math.sqrt(major / minor)
+
+
 def _plausible_parts(
     parts: list[np.ndarray], min_part_area: float = SPLIT_MIN_PART_AREA
 ) -> Optional[list[np.ndarray]]:
-    """Accept a split only if every part could be a paprika on its own."""
+    """Accept a split only if every part could be a paprika on its own.
+
+    Three tests, and they fail differently. Area rejects stems and specks.
+    Solidity rejects stringy fragments. Elongation rejects the case the other
+    two miss: a shadowed lobe of ONE fruit, which is large enough and solid
+    enough to pass as a paprika but far too long and thin to be one. That was
+    reaching the actuator as a second fruit with its own angle.
+
+    Rejecting the split is the conservative outcome. It leaves the blob whole,
+    so the fruit is measured once - possibly badly - rather than twice with
+    contradictory answers.
+    """
     if len(parts) < 2:
         return None
     for part in parts:
         if int((part > 0).sum()) < min_part_area:
             return None
         if _solidity(part) < SPLIT_MIN_SOLIDITY:
+            return None
+        if _elongation(part) > SPLIT_MAX_PART_ELONGATION:
             return None
     return parts
 
@@ -544,6 +627,12 @@ def split_by_hue(
         sample = to_circle(values)
 
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)
+    # Seeded immediately before the draw, not once at import: OpenCV's RNG is
+    # global and advances on every use, so seeding at startup would only make
+    # the FIRST call repeatable. Note this does reset the global stream, which
+    # is harmless here because this is the only OpenCV RNG consumer in the
+    # detector - if another is ever added, both need thinking about together.
+    cv2.setRNGSeed(SPLIT_HUE_RNG_SEED)
     _, _, centers = cv2.kmeans(sample, 2, None, criteria, 4, cv2.KMEANS_PP_CENTERS)
 
     angles = [math.atan2(c[1], c[0]) for c in centers]
@@ -1121,10 +1210,16 @@ def find_fruit(
             if stem_mask is not None:
                 fruit.stem_method = "hue"
                 fruit.stem_quality = STEM_QUALITY_HUE
+                fruit.stem_area_ratio = float(
+                    int((stem_mask > 0).sum()) / max(1, int((blob > 0).sum()))
+                )
         if stem_mask is None:
             stem_mask, quality = _stem_by_morphology(blob)
             if stem_mask is not None:
                 fruit.stem_method = "morphology"
+                fruit.stem_area_ratio = float(
+                    int((stem_mask > 0).sum()) / max(1, int((blob > 0).sum()))
+                )
                 stem_mask = _refine_stem_by_saturation(stem_mask, blob, hsv[:, :, 1])
 
                 # Only for stems found by shape, and only on fruit that could
@@ -1216,7 +1311,64 @@ def find_fruit(
                 measure(part, sub_crop, sub_hsv, sub_hue, (rx1 + bx, ry1 + by))
 
     fruits.sort(key=lambda f: f.area, reverse=True)
+    fruits = _drop_contained(fruits)
     return fruits[:max_fruit]
+
+
+def _bbox_containment(small: tuple, big: tuple) -> float:
+    """How much of `small`'s box lies inside `big`'s, as a fraction of `small`."""
+    overlap_w = max(0, min(small[2], big[2]) - max(small[0], big[0]))
+    overlap_h = max(0, min(small[3], big[3]) - max(small[1], big[1]))
+    small_area = max(1, (small[2] - small[0]) * (small[3] - small[1]))
+    return (overlap_w * overlap_h) / small_area
+
+
+def _drop_contained(fruits: list[ClassicalFruit]) -> list[ClassicalFruit]:
+    """Remove detections that are a piece of a larger detection.
+
+    The splitter guards blobs it splits, but nothing guarded blobs that arrive
+    already separate. A shadowed band along a fruit's edge, dark enough to fall
+    below the saturation floor, becomes its own connected component and then
+    its own fruit - with its own angle, sent to the actuator as if a second
+    paprika were lying there.
+
+    Containment alone is not enough to act on, and this is the trap. Over a
+    1968-frame run four detections were mostly inside a larger one:
+
+        211x40  elongation 4.68              a shadow sliver, and it was PLACED
+        214x79  elongation 2.34 solidity 0.64  a shadow band, also PLACED
+        219x104 elongation 1.83               an edge strip, already rejected
+        281x240 elongation 1.21 solidity 0.98  A WHOLE HEALTHY FRUIT
+
+    The last one is why the shape test is not optional: two fruit side by side,
+    one of them merged with a third into a wide blob, leaves a perfectly good
+    fruit's box sitting inside its neighbour's. Dropping on containment alone
+    would have thrown it away. Requiring the small one to ALSO be misshapen -
+    too long and thin, or too ragged - separates all four correctly.
+    """
+    if len(fruits) < 2:
+        return fruits
+
+    kept: list[ClassicalFruit] = []
+    for fruit in fruits:
+        swallowed = False
+        for other in fruits:
+            if other is fruit or other.area <= fruit.area:
+                continue
+            if _bbox_containment(fruit.bbox, other.bbox) < CONTAINED_MIN_OVERLAP:
+                continue
+            if fruit.area / max(1, other.area) > CONTAINED_MAX_AREA_RATIO:
+                continue
+            misshapen = (
+                _elongation(fruit.mask) > CONTAINED_MAX_ELONGATION
+                or _solidity(fruit.mask) < CONTAINED_MIN_SOLIDITY
+            )
+            if misshapen:
+                swallowed = True
+                break
+        if not swallowed:
+            kept.append(fruit)
+    return kept
 
 
 def edge_cut_ratio(fruit: ClassicalFruit, frame_shape: tuple, margin: int = EDGE_MARGIN_PX) -> float:

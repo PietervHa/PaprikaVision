@@ -12,20 +12,19 @@ import json
 import logging
 import threading
 from datetime import datetime
-from pathlib import Path
 
 from backend.core import db
 from backend.core.config_loader import cfg
+from backend.utils.paths import project_path
 
 log = logging.getLogger(__name__)
 
 _write_lock = threading.Lock()
 
 # Pre-resolve output directory at module load time
-_result_dir = cfg.get("output", {}).get("result_dir", "data/results")
-_output_dir = Path(_result_dir)
-if not _output_dir.is_absolute():
-    _output_dir = Path(__file__).resolve().parents[2] / _output_dir
+_output_dir = project_path(
+    cfg.get("output", {}).get("result_dir"), "data/results"
+)
 
 
 def save_result(result: dict):

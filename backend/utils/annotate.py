@@ -137,12 +137,21 @@ def draw_detections(
         if angle is not None:
             arrow_len = max(24.0, min(x2 - x1, y2 - y1) * 0.55)
             draw_orientation_arrow(frame, center, angle, arrow_len, color, 3 if is_primary else 2)
-        elif pose in ("upside_down", "stem_not_found", "incomplete"):
+        elif pose in (
+            "upside_down",
+            "stem_not_found",
+            "incomplete",
+            "standing_stem_up",
+            "standing_stem_down",
+        ):
             # A cross, not a circle. A circle reads as "still deciding", a
             # cross as "nothing is coming out of this" - and the latter is the
             # case. stem_not_found belongs here rather than with the circle
             # below: no stem found on a fully visible fruit is a settled
-            # reject, not a measurement still in progress.
+            # reject, not a measurement still in progress. Standing (either
+            # end) is just as settled - there is no angle to measure once the
+            # fruit is confirmed end-on to the camera, not a value still
+            # being resolved.
             radius = max(10, int(min(x2 - x1, y2 - y1) * 0.16))
             cx, cy = int(center[0]), int(center[1])
             cv2.line(frame, (cx - radius, cy - radius), (cx + radius, cy + radius), color, 3)
