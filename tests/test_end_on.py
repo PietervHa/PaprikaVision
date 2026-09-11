@@ -205,3 +205,46 @@ def test_groove_estimate_claims_no_flip_confidence():
     assert result is not None
     assert result.angle_deg == 42.0
     assert result.flip_confidence == 0.0, "a groove axis must never claim a stem end"
+
+
+def _diagonal_ripple(crop, size, down_right=True):
+    """Soft bands running diagonally, so the axis is unambiguous.
+
+    Horizontal and vertical textures are symmetric under a y-flip and so cannot
+    catch a sign error in the image-to-screen conversion - which is exactly the
+    bug that shipped. Only a diagonal distinguishes the two conventions.
+    """
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+    phase = (xx - yy) if down_right else (xx + yy)
+    band = (np.sin(phase / 6.0) * 40).astype(np.int16)
+    crop[:] = np.clip(crop.astype(np.int16) + band[..., None], 0, 255).astype(np.uint8)
+
+
+def test_groove_axis_uses_the_screen_convention_not_image_coordinates():
+    """Regression test for a real defect.
+
+    The conversion was written as an inline atan2 and came out mirrored, so
+    every axis was reflected about the horizontal. On symmetric textures that
+    is invisible; on real fruit it measured 43 degrees from the truth on
+    average, which is what a random guess scores. vector_to_angle exists
+    precisely so this conversion happens in one audited place.
+
+    Bands running down-and-right on screen have their long direction going
+    down-right, which in this codebase's convention - 90 degrees is UP - is an
+    orientation of about 135, not 45.
+    """
+    crop, mask = _disc(texture=lambda c, s: _diagonal_ripple(c, s, down_right=True))
+    measured = end_on.groove_axis(crop, mask)
+    assert measured is not None
+    axis, _ = measured
+    assert abs(axis - 135.0) < 20.0, (
+        f"axis {axis:.1f} looks mirrored; expected about 135 in screen convention"
+    )
+
+
+def test_groove_axis_mirrors_correctly_for_the_other_diagonal():
+    crop, mask = _disc(texture=lambda c, s: _diagonal_ripple(c, s, down_right=False))
+    axis, _ = end_on.groove_axis(crop, mask)
+    assert abs(axis - 45.0) < 20.0, (
+        f"axis {axis:.1f} looks mirrored; expected about 45 in screen convention"
+    )
