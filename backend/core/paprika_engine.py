@@ -575,10 +575,25 @@ class PaprikaEngine:
 
         placement = self._placement_for(result)
 
-        # A stem direction that moves with the light is not a direction. This
-        # is measured per fruit by re-running the detection at two other gains,
-        # so it reflects this fruit under this light rather than an average
-        # taken over the dataset.
+        # A fruit whose confidence collapsed still has a body lying on a belt,
+        # and its grooves still run along its axis. Falling back to them turns
+        # "human check needed" into an axis the operator and the log can use.
+        # Deliberately reached from HERE rather than only from the stem-not-
+        # found path: these fruit DO have a stem, it is simply not trusted, and
+        # an earlier revision wired the fallback somewhere they never pass.
+        #
+        # No flip is claimed, so the fruit still goes round again rather than
+        # being placed on an axis with an unknown end.
+        if placement == PLACEMENT_REVIEW and self._groove_axis_fallback:
+            from_grooves = self._groove_axis_estimate(frame, bbox)
+            if from_grooves is not None:
+                from_grooves.notes.extend(result.notes)
+                from_grooves.notes.append(
+                    f"low_confidence_fallback (was {result.confidence:.2f})"
+                )
+                result = from_grooves
+                placement = self._placement_for(result)
+
         # Below the usable floor the angle is withdrawn, not merely flagged.
         # Leaving it in the result means the HMI dial still swings to it and
         # the operator still reads a number - which is the thing this verdict
@@ -592,6 +607,17 @@ class PaprikaEngine:
             result.angle_deg = None
             result.axis_deg = None
 
+        # A stem direction that moves with the light is not a direction. This
+        # is measured per fruit by re-running the detection at two other gains,
+        # so it reflects this fruit under this light rather than an average
+        # taken over the dataset.
+        #
+        # An unavailable check reports a spread of 0.0, so it cannot trip the
+        # threshold below - no extra guard is needed here, only a note, so that
+        # a record showing spread 0 is not later mistaken for a rock-steady
+        # stem when in truth nobody managed to measure it.
+        if str(detection.get("stem_selfcheck", "skipped")) == "unavailable":
+            result.notes.append("selfcheck_unavailable")
         spread = float(detection.get("stem_spread_deg", 0.0) or 0.0)
         if placement == PLACEMENT_PLACE and spread > self._max_stem_spread_deg:
             placement = PLACEMENT_REORIENT
