@@ -55,6 +55,13 @@ PLACEMENT_PLACE = "place"
 PLACEMENT_REORIENT = "reorient"
 PLACEMENT_REJECT = "reject"
 PLACEMENT_UNKNOWN = "unknown"
+# Below min_usable_confidence the measurement is not weak, it is absent - the
+# numbers that come out are whatever the noise happened to be. "unknown" already
+# means "measured, and not good enough to act on"; this means "there is nothing
+# here worth calling a measurement, send a person". Kept apart from unknown so
+# the counters separate a detector working badly from a detector not working at
+# all, which are different things to go and fix.
+PLACEMENT_REVIEW = "review"
 
 # Why the detector said a fruit is unusable, mapped onto the pose it is
 # recorded as. The keys are the REASON_* values in
@@ -145,6 +152,9 @@ class PaprikaEngine:
         # Placement policy thresholds.
         policy = block.get("policy") if isinstance(block.get("policy"), dict) else {}
         self._min_angle_confidence = float(policy.get("min_angle_confidence", 0.45))
+        # Floor below which no angle is reported at all, not even as a guess
+        # the operator could overrule.
+        self._min_usable_confidence = float(policy.get("min_usable_confidence", 0.15))
         self._min_flip_confidence = float(policy.get("min_flip_confidence", 0.40))
         self._reject_standing = bool(policy.get("reject_standing", True))
         # A fruit whose stem could not be found is not the same as a fruit that
@@ -239,6 +249,14 @@ class PaprikaEngine:
         if result.angle_deg is None:
             return PLACEMENT_UNKNOWN
 
+        # Checked before the ordinary confidence gate, because it is a
+        # different statement. Between the two thresholds the machine has a
+        # real measurement it does not trust enough to act on; below the floor
+        # it has no measurement, and printing a number next to it invites
+        # somebody to read meaning into noise.
+        if result.confidence < self._min_usable_confidence:
+            return PLACEMENT_REVIEW
+
         if result.confidence < self._min_angle_confidence:
             return PLACEMENT_UNKNOWN
 
@@ -251,6 +269,11 @@ class PaprikaEngine:
 
     @staticmethod
     def _label_for(result: Orientation, placement: str) -> str:
+        if placement == PLACEMENT_REVIEW:
+            # Deliberately carries no number. The angle behind this verdict is
+            # kept in the notes for anyone reading the record back, but it is
+            # not put in front of an operator as though it were an answer.
+            return "human check needed"
         if result.pose == orient.POSE_STANDING_STEM_UP:
             return "standing, stem up"
         if result.pose == orient.POSE_STANDING_STEM_DOWN:
@@ -556,6 +579,19 @@ class PaprikaEngine:
         # is measured per fruit by re-running the detection at two other gains,
         # so it reflects this fruit under this light rather than an average
         # taken over the dataset.
+        # Below the usable floor the angle is withdrawn, not merely flagged.
+        # Leaving it in the result means the HMI dial still swings to it and
+        # the operator still reads a number - which is the thing this verdict
+        # exists to prevent. It is kept in the notes instead, where anyone
+        # reading the record back can see what was discarded and why.
+        if placement == PLACEMENT_REVIEW and result.angle_deg is not None:
+            result.notes.append(
+                f"angle_withheld={result.angle_deg:.0f}deg "
+                f"confidence={result.confidence:.2f}"
+            )
+            result.angle_deg = None
+            result.axis_deg = None
+
         spread = float(detection.get("stem_spread_deg", 0.0) or 0.0)
         if placement == PLACEMENT_PLACE and spread > self._max_stem_spread_deg:
             placement = PLACEMENT_REORIENT

@@ -181,7 +181,23 @@ paprika:
     # nothing to measure. The robot cannot pick up an upside-down paprika and
     # turn it over, so returning a number would imply an action that does not
     # exist. The PLC simply gets NOK.
-    min_angle_confidence: 0.45   # below this -> "unknown"
+    min_angle_confidence: 0.45
+
+    # Floor below which no angle is reported at all.
+    #
+    # These two thresholds say different things. Between 0.15 and 0.45 the
+    # machine HAS a measurement and does not trust it enough to act - that is
+    # "unknown", and the angle is still shown so an operator can see what it
+    # was leaning towards. Below 0.15 there is no measurement: the numbers
+    # coming out are whatever the noise happened to be, and printing one next
+    # to the fruit invites somebody to read meaning into it. Those are marked
+    # "human check needed", the angle is withheld from the result and the dial,
+    # and the value that was discarded is kept in the notes.
+    #
+    # Counted separately from reject, because they are different faults to go
+    # and fix: a rising reject count is about the fruit, a rising review count
+    # is about the detector.
+    min_usable_confidence: 0.15   # below this -> "unknown"
     min_flip_confidence: 0.40    # axis is solid but which end is the stem is not
     # true  -> a standing fruit is a reject (topple and re-present it)
     # false -> reported as "reorient" instead

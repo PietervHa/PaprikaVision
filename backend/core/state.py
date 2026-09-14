@@ -35,6 +35,11 @@ _EMPTY_COUNTERS = {
     "total": 0,
     "reorient": 0,
     "reject": 0,
+    # Counted apart from reject: a review is a fruit the machine could not
+    # measure, not one it measured and turned down. A rising review count means
+    # go and look at the detector; a rising reject count means go and look at
+    # the fruit.
+    "review": 0,
     **{pose: 0 for pose in COUNTED_POSES},
 }
 
@@ -77,7 +82,7 @@ class AppState:
                 self.counters["ok"] += 1
             else:
                 self.counters["nok"] += 1
-            if placement in ("reorient", "reject"):
+            if placement in ("reorient", "reject", "review"):
                 self.counters[placement] += 1
             # See COUNTED_POSES: these are counted apart because they are
             # different problems with different fixes, not because the machine
