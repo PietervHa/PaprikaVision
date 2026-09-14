@@ -35,9 +35,9 @@
 /* The `hidden` attribute must beat component display rules.
  *
  * The browser's built-in rule is only `[hidden] { display: none }`, which any
- * author-level `display` declaration outranks. Both .dialog-backdrop and
- * .feed-overlay set `display: grid` for centring, so without this they stay on
- * screen permanently no matter what the JS sets `.hidden` to. */
+ * author-level `display` declaration outranks. `.feed-overlay` sets
+ * `display: grid` for centring, so without this it stays on screen
+ * permanently no matter what the JS sets `.hidden` to. */
 [hidden] { display: none !important; }
 
 html, body {
@@ -69,15 +69,6 @@ html, body {
 }
 .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
 .machine-id { color: var(--text-dim); font-variant-numeric: tabular-nums; }
-
-.badge {
-  padding: 4px 12px;
-  border-radius: 999px;
-  font-size: 0.8rem;
-  font-weight: 600;
-}
-.badge-production { background: #24303f; color: var(--text-dim); }
-.badge-maintenance { background: var(--reorient); color: #1b1300; }
 
 /* ------------------------------------------------------------- workspace */
 
@@ -117,7 +108,13 @@ html, body {
   border-radius: var(--radius);
 }
 
-.feed-controls { display: flex; align-items: center; gap: 10px; }
+.feed-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 22px;
+}
+.ctrl-group { display: flex; align-items: center; gap: 8px; }
 .legend {
   margin-left: auto;
   display: flex;
@@ -228,9 +225,6 @@ html, body {
 
 /* ------------------------------------------------------------- controls */
 
-.actions { display: flex; gap: 8px; }
-.actions .ctrl { flex: 1; }
-
 .ctrl {
   background: var(--panel-raised);
   color: var(--text);
@@ -244,43 +238,6 @@ html, body {
 .ctrl:hover:not(:disabled) { background: #2b3542; }
 .ctrl:disabled { opacity: 0.4; cursor: not-allowed; }
 .ctrl:focus-visible { outline: 2px solid var(--place); outline-offset: 2px; }
-.ctrl-primary { background: #2c6b8f; border-color: #37809f; }
-.ctrl-primary:hover:not(:disabled) { background: #337ba3; }
-
-/* -------------------------------------------------------------- dialogs */
-
-.dialog-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(8, 10, 14, 0.75);
-  display: grid;
-  place-items: center;
-  z-index: 50;
-}
-.dialog {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 22px;
-  width: min(360px, 92vw);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.dialog h2 { margin: 0 0 6px; font-size: 1.05rem; }
-.dialog label { color: var(--text-dim); font-size: 0.8rem; }
-.dialog input {
-  background: var(--ground);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  color: var(--text);
-  padding: 9px 11px;
-  font-size: 0.95rem;
-  font-family: inherit;
-}
-.dialog-error { color: var(--reject); font-size: 0.84rem; margin: 4px 0 0; }
-.dialog-actions { display: flex; gap: 8px; margin-top: 12px; }
-.dialog-actions .ctrl { flex: 1; }
 
 .toast {
   position: fixed;

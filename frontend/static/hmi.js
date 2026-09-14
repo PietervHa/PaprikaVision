@@ -9,7 +9,6 @@
 const POLL_MS = 250;
 const STATUS_MS = 3000;
 
-let IS_MAINTENANCE = false;
 let OVERLAY_RUNNING = true;
 
 /* ------------------------------------------------------------------ utils */
@@ -218,25 +217,10 @@ async function pollResult() {
   }
 }
 
-function applyMaintenanceUI() {
-  $("modeBadge").textContent = IS_MAINTENANCE ? "Maintenance" : "Production";
-  $("modeBadge").className = "badge " + (IS_MAINTENANCE ? "badge-maintenance" : "badge-production");
-  $("maintBtn").textContent = IS_MAINTENANCE ? "Exit maintenance" : "Maintenance";
-
-  // Everything that changes machine behaviour stays locked in production, the
-  // same rule the previous system used.
-  for (const id of ["overlayBtn", "rotateBtn", "resetBtn"]) {
-    $(id).disabled = !IS_MAINTENANCE;
-  }
-}
-
 async function pollStatus() {
   try {
     const res = await fetch("/status", { credentials: "same-origin" });
     const data = await res.json();
-
-    IS_MAINTENANCE = !!data.maintenance_mode;
-    applyMaintenanceUI();
 
     $("machineId").textContent = data.machine_id || "—";
     refreshSource();
@@ -261,7 +245,7 @@ async function pollStatus() {
 
 $("overlayBtn").addEventListener("click", async () => {
   const res = await post("/overlay/toggle");
-  if (!res.ok) return toast("Not in maintenance mode.", true);
+  if (!res.ok) return toast("Could not toggle overlay.", true);
   const data = await res.json();
   OVERLAY_RUNNING = data.running;
   $("overlayBtn").textContent = OVERLAY_RUNNING ? "Pause overlay" : "Resume overlay";
@@ -269,54 +253,13 @@ $("overlayBtn").addEventListener("click", async () => {
 
 $("rotateBtn").addEventListener("click", async () => {
   const res = await post("/camera_rotation");
-  if (!res.ok) toast("Not in maintenance mode.", true);
+  if (!res.ok) toast("Could not rotate camera.", true);
 });
 
 $("resetBtn").addEventListener("click", async () => {
   const res = await post("/reset_counters");
   if (res.ok) toast("Counters reset.");
-  else toast("Not in maintenance mode.", true);
-});
-
-$("maintBtn").addEventListener("click", async () => {
-  if (IS_MAINTENANCE) {
-    await post("/maintenance_mode", { maintenance_mode: false });
-    IS_MAINTENANCE = false;
-    applyMaintenanceUI();
-    toast("Back in production mode.");
-    return;
-  }
-  $("loginError").hidden = true;
-  $("loginDialog").hidden = false;
-  $("loginUser").focus();
-});
-
-$("loginCancel").addEventListener("click", () => { $("loginDialog").hidden = true; });
-
-$("loginForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const res = await post("/maintenance_mode", {
-    maintenance_mode: true,
-    username: $("loginUser").value.trim(),
-    password: $("loginPass").value,
-  });
-
-  if (!res.ok) {
-    let message = "Sign in failed.";
-    try {
-      const body = await res.json();
-      if (body && body.message) message = body.message;
-    } catch (err) { /* non-JSON body; keep the generic message */ }
-    $("loginError").textContent = message;
-    $("loginError").hidden = false;
-    return;
-  }
-
-  $("loginPass").value = "";
-  $("loginDialog").hidden = true;
-  IS_MAINTENANCE = true;
-  applyMaintenanceUI();
-  toast("Maintenance mode active.");
+  else toast("Could not reset counters.", true);
 });
 
 /* ----------------------------------------------------------- file source
@@ -337,9 +280,6 @@ async function refreshSource() {
     $("factImage").textContent = `${data.index + 1}/${data.count}`;
     $("factImage").title = data.name || "";
     $("holdBtn").textContent = data.hold ? "Resume" : "Hold";
-    for (const id of ["prevBtn", "nextBtn", "holdBtn"]) {
-      $(id).disabled = !IS_MAINTENANCE;
-    }
   } catch (err) {
     /* not a file source */
   }
@@ -347,7 +287,7 @@ async function refreshSource() {
 
 async function stepSource(url) {
   const res = await post(url);
-  if (!res.ok) return toast("Enable maintenance mode first.", true);
+  if (!res.ok) return toast("Could not switch image.", true);
   const data = await res.json();
   $("factImage").textContent = `${data.index + 1}/${data.count}`;
   $("factImage").title = data.name || "";
@@ -360,7 +300,7 @@ $("holdBtn").addEventListener("click", () => stepSource("/source/hold"));
 
 // Arrow keys: faster than clicking when stepping through 160 images.
 document.addEventListener("keydown", (event) => {
-  if (!IS_FOLDER || !IS_MAINTENANCE) return;
+  if (!IS_FOLDER) return;
   if (event.target.tagName === "INPUT") return;
   if (event.key === "ArrowRight") stepSource("/source/next");
   if (event.key === "ArrowLeft") stepSource("/source/previous");
@@ -369,7 +309,6 @@ document.addEventListener("keydown", (event) => {
 /* ------------------------------------------------------------------- boot */
 
 drawDial(null, "unknown");
-applyMaintenanceUI();
 refreshSource();
 pollStatus();
 pollResult();

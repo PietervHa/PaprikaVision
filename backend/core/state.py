@@ -53,9 +53,6 @@ class AppState:
         self.counters = dict(_EMPTY_COUNTERS)
 
         self.vision_mode = str(cfg.get("vision_mode", "paprika"))
-        self.maintenance_mode = False
-        self.maintenance_session_token = ""
-        self.maintenance_session_user = ""
         self.camera_rotation = 0
 
         # Live overlay state. Kept separate from latest_result on purpose:
@@ -97,7 +94,6 @@ class AppState:
             return {
                 "result": dict(self.latest_result),
                 "counters": dict(self.counters),
-                "maintenance_mode": self.maintenance_mode,
                 "vision_mode": self.vision_mode,
             }
 
@@ -138,30 +134,6 @@ class AppState:
         with self.lock:
             if value in VALID_VISION_MODES:
                 self.vision_mode = value
-
-    def get_maintenance_mode(self) -> bool:
-        with self.lock:
-            return self.maintenance_mode
-
-    def set_maintenance_mode(self, value: bool):
-        with self.lock:
-            self.maintenance_mode = bool(value)
-
-    def get_maintenance_session_token(self) -> str:
-        with self.lock:
-            return self.maintenance_session_token
-
-    def set_maintenance_session_token(self, value: str):
-        with self.lock:
-            self.maintenance_session_token = str(value or "")
-
-    def get_maintenance_session_user(self) -> str:
-        with self.lock:
-            return self.maintenance_session_user
-
-    def set_maintenance_session_user(self, value: str):
-        with self.lock:
-            self.maintenance_session_user = str(value or "")
 
     def get_camera_rotation(self) -> int:
         with self.lock:
