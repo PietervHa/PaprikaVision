@@ -488,6 +488,11 @@ def score(args) -> int:
                 "placement": found["placement"],
                 "source": (found.get("orientation") or {}).get("source"),
                 "error": error,
+                "frame": name,
+                "bbox": found["bbox"],
+                "reported": angle,
+                "truth": entry["true_angle_deg"],
+                "notes": (found.get("orientation") or {}).get("notes") or [],
             })
 
     if missing:
@@ -519,6 +524,21 @@ def score(args) -> int:
     print()
     for src in sorted({r["source"] for r in rows if r["source"]}):
         report(f"estimator: {src}", [r for r in rows if r["source"] == src])
+
+    # The worst placements, named. An aggregate tells you there is a tail; only
+    # the filenames let you go and look at it, and every fix in this project
+    # that stuck came from looking at specific frames rather than at summaries.
+    worst = sorted(
+        (r for r in rows if r["placement"] == "place" and r["error"] is not None),
+        key=lambda r: -r["error"],
+    )[: args.worst]
+    if worst and args.worst:
+        print(f"\nWORST {len(worst)} PLACED FRUIT - these reached the actuator:")
+        for r in worst:
+            tags = [n for n in r["notes"] if not n.startswith("width_signal")][:2]
+            print(f"   {r['error']:6.1f} deg off   {r['frame']:<42} "
+                  f"said {r['reported']:6.1f}, truth {r['truth']:6.1f}   "
+                  f"{r['source']}  {tags}")
 
     placed = [r["error"] for r in rows
               if r["placement"] == "place" and r["error"] is not None]
@@ -554,6 +574,9 @@ def main() -> int:
                         help="stop after this many fruit (0 = no limit)")
     parser.add_argument("--score", action="store_true",
                         help="score the detector against existing labels")
+    parser.add_argument("--worst", type=int, default=10,
+                        help="with --score, list this many worst PLACED fruit by "
+                             "name so they can be looked at (0 = none)")
     parser.add_argument("--repair", action="store_true",
                         help="recompute centroid_xy and true_angle_deg from the "
                              "frames; fixes labels taken with the buggy first "
