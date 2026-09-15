@@ -155,6 +155,13 @@ class PaprikaEngine:
         # Floor below which no angle is reported at all, not even as a guess
         # the operator could overrule.
         self._min_usable_confidence = float(policy.get("min_usable_confidence", 0.15))
+        # Withhold the angle from "unknown" as well, not only from "review".
+        # "unknown" already means the ANGLE is not trusted - as distinct from
+        # "reorient", which means the angle is trusted and the stem END is not.
+        # Printing a number beside a verdict that says the number cannot be
+        # relied on invites somebody to rely on it, which is the whole reason
+        # these verdicts exist.
+        self._hide_unknown_angle = bool(policy.get("hide_unknown_angle", True))
         self._min_flip_confidence = float(policy.get("min_flip_confidence", 0.40))
         self._reject_standing = bool(policy.get("reject_standing", True))
         # A fruit whose stem could not be found is not the same as a fruit that
@@ -193,6 +200,22 @@ class PaprikaEngine:
         # Maximum measured movement of the stem direction under a lighting
         # change before the fruit is sent round again instead of placed.
         self._max_stem_spread_deg = float(policy.get("max_stem_spread_deg", 6.0))
+        # A stem WAS found (this is not the no_stem/groove path above) but the
+        # verdict it produced is not placeable. Rather than trust it anyway or
+        # give up and send the fruit to review, ask shape_orientation() to
+        # settle just the flip - the same fuse() arbitration shape_crosscheck
+        # already does, run here only when the un-helped verdict needed help.
+        # Scoped to green by default: colour finds the stem directly on
+        # red/orange (measured hit rate 87%), so there is nothing uncertain
+        # there worth a second opinion; on green, colour cannot see the stem
+        # at all and quality comes entirely from morphology plus a brightness
+        # self-check that is measurably more fragile - see stem_by_morphology
+        # and _stem_selfcheck in classical.py for why.
+        self._uncertain_shape_crosscheck = bool(policy.get("uncertain_shape_crosscheck", True))
+        self._uncertain_shape_colours = {
+            str(colour).strip().lower()
+            for colour in (policy.get("uncertain_shape_colours") or ["green"])
+        }
 
         # Machine frame mapping. Changing how the vision zero lines up with the
         # actuator zero must never require a code change - it is a commissioning
@@ -215,6 +238,8 @@ class PaprikaEngine:
             {
                 "shape_crosscheck": self._use_shape_crosscheck,
                 "stemless_shape_fallback": self._stemless_shape_fallback,
+                "uncertain_shape_crosscheck": self._uncertain_shape_crosscheck,
+                "uncertain_shape_colours": sorted(self._uncertain_shape_colours),
                 "angle_offset_deg": self._angle_offset_deg,
                 "angle_invert": self._angle_invert,
                 "primary_rule": self._primary_rule,
@@ -575,6 +600,56 @@ class PaprikaEngine:
 
         placement = self._placement_for(result)
 
+        # A stem WAS found here (this branch is only reached when reason was
+        # never "no_stem" above), so the fruit is not stemless - it simply was
+        # not trusted enough to place outright. Tightening stem detection to
+        # push more green fruit into the stemless fallback above does not fix
+        # that; it only trades one failure mode for the other, since that
+        # fallback runs the same width-profile geometry a real visible stem
+        # can corrupt (see the shape_orientation docstring in orientation.py
+        # for the measured version of that failure). Consulting the shape
+        # estimator here instead asks it to settle exactly what fuse() already
+        # knows how to settle - the flip - using the same arbitration
+        # shape_crosscheck performs, without another dial on the stem search.
+        if (
+            placement != PLACEMENT_PLACE
+            and self._uncertain_shape_crosscheck
+            and not use_shape
+            and frame is not None
+            and detection.get("colour", "").strip().lower() in self._uncertain_shape_colours
+        ):
+            uncertain_mask = orient.segment_fruit(
+                frame, bbox, saturation_floor=self._saturation_floor, belt_hue=self._belt_hue
+            )
+            shape_result = (
+                orient.shape_orientation(uncertain_mask) if uncertain_mask is not None else None
+            )
+            if shape_result is not None and shape_result.angle_deg is not None:
+                if result.confidence < self._min_usable_confidence:
+                    # fuse() always keeps the keypoint axis on the reasoning
+                    # that it was "produced" by a detector trained on this
+                    # exact fruit - but a self-check that collapsed quality
+                    # to (near) zero is the detector itself saying it does not
+                    # trust that axis either. Below the same floor that sends
+                    # a fruit to review anyway, keeping it would only be
+                    # honouring a technicality, not real evidence. Let shape
+                    # stand in fully here, the same as the genuinely stemless
+                    # case above, rather than asking fuse()'s modest
+                    # agreement bonus to climb out of a near-zero start.
+                    shape_result.notes.extend(result.notes)
+                    shape_result.notes.append(
+                        f"uncertain_stem_shape_crosscheck (stem confidence {result.confidence:.2f})"
+                    )
+                    result = shape_result
+                else:
+                    # Confidence is usable, only the flip (or the margin) was
+                    # in question - fuse()'s normal arbitration already
+                    # handles exactly this.
+                    fused = orient.fuse(result, shape_result)
+                    fused.notes.append("uncertain_stem_shape_crosscheck")
+                    result = fused
+                placement = self._placement_for(result)
+
         # A fruit whose confidence collapsed still has a body lying on a belt,
         # and its grooves still run along its axis. Falling back to them turns
         # "human check needed" into an axis the operator and the log can use.
@@ -599,7 +674,10 @@ class PaprikaEngine:
         # the operator still reads a number - which is the thing this verdict
         # exists to prevent. It is kept in the notes instead, where anyone
         # reading the record back can see what was discarded and why.
-        if placement == PLACEMENT_REVIEW and result.angle_deg is not None:
+        withhold = placement == PLACEMENT_REVIEW or (
+            placement == PLACEMENT_UNKNOWN and self._hide_unknown_angle
+        )
+        if withhold and result.angle_deg is not None:
             result.notes.append(
                 f"angle_withheld={result.angle_deg:.0f}deg "
                 f"confidence={result.confidence:.2f}"

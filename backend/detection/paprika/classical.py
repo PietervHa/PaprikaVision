@@ -764,7 +764,7 @@ def _stem_by_hue(
     return stem
 
 
-def _stem_by_morphology(fruit: np.ndarray) -> tuple[Optional[np.ndarray], float]:
+def stem_by_morphology(fruit: np.ndarray) -> tuple[Optional[np.ndarray], float]:
     """Stem as a thin protrusion, independent of colour.
 
     The fruit is first scaled to a fixed reference radius, so the morphology
@@ -777,6 +777,15 @@ def _stem_by_morphology(fruit: np.ndarray) -> tuple[Optional[np.ndarray], float]
     so a few pixels of segmentation difference between frames changed what
     survived the opening, and the reported angle jumped. Requiring agreement
     turns that brittleness into an honest "no stem".
+
+    Public (no leading underscore) because orientation.shape_orientation() also
+    calls this directly: the boundary/silhouette route needs to know about a
+    visible stem stub for exactly the same reason this module does - a thin
+    protrusion the width-profile heuristic cannot explain - and a second
+    reimplementation of "open with a kernel wider than the stem" would drift
+    from this one the first time either was tuned. Takes a plain 0/255 mask
+    and returns nothing colour-specific, so there is no dependency the other
+    direction: classical.py still knows nothing about orientation.py.
     """
     area = int((fruit > 0).sum())
     if area <= 0:
@@ -859,7 +868,7 @@ def _stem_by_morphology(fruit: np.ndarray) -> tuple[Optional[np.ndarray], float]
 
 def _stem_direction(fruit: np.ndarray) -> Optional[float]:
     """Direction from the fruit centroid to the calyx, or None."""
-    stem, _ = _stem_by_morphology(fruit)
+    stem, _ = stem_by_morphology(fruit)
     if stem is None:
         return None
     centre = _mask_centroid(fruit)
@@ -1253,7 +1262,7 @@ def find_fruit(
                     int((stem_mask > 0).sum()) / max(1, int((blob > 0).sum()))
                 )
         if stem_mask is None:
-            stem_mask, quality = _stem_by_morphology(blob)
+            stem_mask, quality = stem_by_morphology(blob)
             if stem_mask is not None:
                 fruit.stem_method = "morphology"
                 fruit.stem_area_ratio = float(

@@ -95,3 +95,27 @@ def test_review_has_its_own_overlay_colour():
         color_for_placement("reject"),
         color_for_placement("unknown"),
     )
+
+
+def test_unknown_also_withholds_its_angle():
+    """"stem 29 deg (unknown)" beside a fruit whose stem is plainly elsewhere
+    is the machine guessing out loud. An operator reads the number long before
+    they read the bracket."""
+    engine = _engine()
+    result = _lying(0.30)                      # between the two thresholds
+    assert engine._placement_for(result) == PLACEMENT_UNKNOWN
+    assert engine._hide_unknown_angle is True
+
+
+def test_reorient_keeps_its_angle():
+    """The distinction that makes this safe: reorient means the ANGLE is
+    trusted and the stem END is not, so its angle is still worth showing.
+    Withholding it too would throw away a good measurement."""
+    engine = _engine()
+    result = _lying(0.90, flip=0.10)
+    assert engine._placement_for(result) == "reorient"
+    assert engine._hide_unknown_angle is True   # unknown hidden, reorient not
+
+
+def test_hiding_unknown_angles_can_be_switched_off():
+    assert _engine(hide_unknown_angle=False)._hide_unknown_angle is False

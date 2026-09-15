@@ -167,6 +167,51 @@ def test_round_silhouette_reports_no_axis():
     assert result.elongation < 1.12
 
 
+@pytest.mark.parametrize("color_name", list(COLORS))
+@pytest.mark.parametrize("angle", [0, 30, 90, 150, 200, 270, 315])
+def test_shape_orientation_is_not_fooled_by_a_visible_stem(color_name, angle):
+    """A stem left in the mask used to flip the width profile's verdict with a
+    confident-looking margin, on every angle tested, because the stem's own
+    width dragged that end's slice of the profile down toward the stem's
+    width instead of the shoulder's. shape_orientation() must now strip it
+    before measuring, and use its position as the flip signal instead."""
+    image, _, _ = render_paprika(angle, color=COLORS[color_name], with_stem=True)
+    result = orient.shape_orientation(orient.segment_fruit(image))
+    assert result.angle_deg is not None
+    assert orient.angular_difference(result.angle_deg, angle) < 5.0
+    assert any("protrusion" in n for n in result.notes)
+
+
+def test_shape_orientation_rescues_a_symmetric_fruit_via_its_stem():
+    """The width profile alone cannot place a symmetric silhouette (see
+    test_symmetric_fruit_reports_low_flip_confidence) - it has no taper to
+    read. A visible stem does not depend on a taper at all: its position
+    relative to the body is the answer, regardless of how round the body is.
+    """
+    for angle in (20, 100, 260):
+        image, _, _ = render_paprika(
+            angle, shoulder_w=74, tip_w=74, color=COLORS["green"], with_stem=True
+        )
+        result = orient.shape_orientation(orient.segment_fruit(image))
+        assert result.angle_deg is not None
+        assert orient.angular_difference(result.angle_deg, angle) < 5.0
+        assert result.flip_confidence > 0.55
+
+
+def test_shape_orientation_without_a_stem_is_unaffected():
+    """detect_protrusion=False must reproduce the original width-profile-only
+    behaviour exactly, so the two routes can still be compared directly (see
+    tools/tune_shape.py) and nothing here silently changes a stemless
+    fruit's answer."""
+    image, _, _ = render_paprika(30, color=COLORS["green"])
+    mask = orient.segment_fruit(image)
+    with_detection = orient.shape_orientation(mask)
+    without_detection = orient.shape_orientation(mask, detect_protrusion=False)
+    assert with_detection.angle_deg == without_detection.angle_deg
+    assert with_detection.confidence == without_detection.confidence
+    assert with_detection.flip_confidence == without_detection.flip_confidence
+
+
 # ----------------------------------------------------------- keypoint route
 
 
@@ -586,6 +631,70 @@ def test_stem_found_by_colour_is_treated_as_stable():
     assert primary["stem_method"] == "hue"
     assert primary["stem_spread_deg"] == 0.0
     assert primary["placement"] == "place"
+
+
+def _weak_green_stem_detection(image, bbox, stem_pt, blossom_pt, quality=0.05):
+    """A stem that was found in the right place, but whose confidence
+    collapsed - the failure mode _stem_selfcheck produces on green when a
+    brightness variant cannot re-find the stem at all (see classical.py)."""
+    from backend.detection.paprika.orientation import Keypoint
+
+    return {
+        "bbox": bbox,
+        "confidence": 0.9,
+        "colour": "green",
+        "stem_method": "morphology",
+        "keypoints": {
+            "stem_end": Keypoint(stem_pt[0], stem_pt[1], quality, True),
+            "blossom_end": Keypoint(blossom_pt[0], blossom_pt[1], quality, True),
+        },
+    }
+
+
+def test_uncertain_green_stem_is_rescued_by_shape_crosscheck():
+    """This is the exact complaint this feature exists for: stem detection on
+    green becomes "unsure" (quality collapses on both landmarks alike, not
+    just the flip), and the fruit used to go straight to review even though
+    the silhouette still had a perfectly readable stem in it."""
+    image, stem_pt, blossom_pt = render_paprika(40, color=COLORS["green"], with_stem=True)
+    engine = _engine()
+    bbox = engine.evaluate(image)["primary"]["bbox"]
+    detection = _weak_green_stem_detection(image, bbox, stem_pt, blossom_pt)
+
+    evaluated = engine._evaluate_one(image, detection)
+
+    assert evaluated["placement"] == "place"
+    assert orient.angular_difference(evaluated["angle_plc"], 40) < 5.0
+    assert any("uncertain_stem_shape_crosscheck" in n for n in evaluated["orientation"]["notes"])
+
+
+def test_uncertain_shape_crosscheck_can_be_switched_off():
+    image, stem_pt, blossom_pt = render_paprika(40, color=COLORS["green"], with_stem=True)
+    engine = _engine(policy={"uncertain_shape_crosscheck": False})
+    bbox = engine.evaluate(image)["primary"]["bbox"]
+    detection = _weak_green_stem_detection(image, bbox, stem_pt, blossom_pt)
+
+    evaluated = engine._evaluate_one(image, detection)
+
+    assert evaluated["placement"] != "place"
+    assert not any(
+        "uncertain_stem_shape_crosscheck" in n for n in evaluated["orientation"]["notes"]
+    )
+
+
+def test_uncertain_shape_crosscheck_is_scoped_to_configured_colours():
+    """Colour finds the stem directly on red/orange (measured hit rate 87%),
+    so a weak result there is not the fragile-self-check problem this exists
+    for - it should be sent for review like today, not quietly overridden."""
+    image, stem_pt, blossom_pt = render_paprika(40, color=COLORS["red"], with_stem=True)
+    engine = _engine()
+    bbox = engine.evaluate(image)["primary"]["bbox"]
+    detection = _weak_green_stem_detection(image, bbox, stem_pt, blossom_pt)
+    detection["colour"] = "red"
+
+    evaluated = engine._evaluate_one(image, detection)
+
+    assert evaluated["placement"] != "place"
 
 
 def test_a_usable_fruit_is_never_displaced_by_a_rejected_one():

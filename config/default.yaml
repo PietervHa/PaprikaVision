@@ -197,7 +197,21 @@ paprika:
     # Counted separately from reject, because they are different faults to go
     # and fix: a rising reject count is about the fruit, a rising review count
     # is about the detector.
-    min_usable_confidence: 0.15   # below this -> "unknown"
+    min_usable_confidence: 0.15
+
+    # Whether "unknown" also hides its angle.
+    #
+    # The three non-placing verdicts mean different things and only one of them
+    # has a usable number behind it:
+    #   reorient - the angle is trusted, the stem END is not. Keep the angle.
+    #   unknown  - the ANGLE itself is not trusted. Hide it.
+    #   review   - there is no measurement at all. Hide it (always).
+    #
+    # Drawing "stem 29 deg (unknown)" beside a fruit whose stem is plainly
+    # somewhere else is the machine guessing out loud, and an operator reads
+    # the number long before they read the bracket. The discarded value is
+    # still written to the notes.
+    hide_unknown_angle: true   # below this -> "unknown"
     min_flip_confidence: 0.40    # axis is solid but which end is the stem is not
     # true  -> a standing fruit is a reject (topple and re-present it)
     # false -> reported as "reorient" instead
@@ -297,6 +311,28 @@ paprika:
     # Raise it to place more fruit and accept more misplacements; lower it to be
     # stricter. Set the whole check off with paprika.shape.stem_selfcheck.
     max_stem_spread_deg: 6.0
+
+    # A stem WAS found (this fruit never went through the no_stem path above)
+    # but the verdict was not placeable - on green that is most often the
+    # self-check above collapsing quality on a stem it could not re-find
+    # under one of the two brightness variants, which drags BOTH the axis and
+    # the flip confidence down together, not just the flip. Tightening stem
+    # detection to cut that does not help: it only pushes more green fruit
+    # into the same no_stem/shape-only path, running the same width-profile
+    # geometry a visible-but-uncounted stem stub can flip outright (see the
+    # shape_orientation docstring in orientation.py). Consulting shape here
+    # instead - below min_usable_confidence it stands in fully, otherwise it
+    # goes through the same fuse() arbitration shape_crosscheck uses - was
+    # measured to recover exactly this case on synthetic fruit; it has not
+    # yet been measured against labelled real crops the way the numbers above
+    # were, so treat it as a first pass and re-check with tools/tune_shape.py
+    # before relying on it at volume.
+    uncertain_shape_crosscheck: true
+    # Colour finds the stem directly on red/orange/yellow (measured hit rate
+    # 87% - see stem_by_hue in classical.py), so there is nothing uncertain
+    # there worth a second opinion. Green is the only colour that cannot see
+    # its own stem by hue at all.
+    uncertain_shape_colours: [green]
 
   # ---------------------------------------------------------------------------
   # frame: map the vision angle onto the machine's angle.

@@ -63,10 +63,7 @@ def _process_vision_result(result, trigger_time, app_state):
 
 
 def vision_trigger_loop(camera, app_state):
-    """Manual trigger: press Q to run one cycle, same as the old project."""
     import keyboard
-
-    log.info("Press Q to trigger a cycle. Ctrl+C to exit.")
 
     while True:
         try:
