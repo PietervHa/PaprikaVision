@@ -251,9 +251,14 @@ def label(args) -> int:
             # The centroid is drawn because the true angle is measured FROM it.
             # Seeing it makes an implausible label obvious while clicking
             # rather than weeks later in a scoring run.
+            # ClassicalFruit.centroid is ALREADY in full-frame coordinates
+            # (classical.py adds the ROI offset when it builds the fruit), so
+            # only the crop origin comes off here. Adding the bbox offset as
+            # well was an early bug that put the centroid outside its own
+            # fruit and made every label unmatchable - see --repair.
             centre_view = (
-                int((item.centroid[0] + x1 - cx1) * scale),
-                int((item.centroid[1] + y1 - cy1) * scale),
+                int((item.centroid[0] - cx1) * scale),
+                int((item.centroid[1] - cy1) * scale),
             )
             cv2.circle(view, centre_view, 6, (255, 200, 0), -1)
 
@@ -294,7 +299,7 @@ def label(args) -> int:
 
             record = {
                 "bbox": [int(v) for v in item.bbox],
-                "centroid_xy": [float(item.centroid[0] + x1), float(item.centroid[1] + y1)],
+                "centroid_xy": [float(item.centroid[0]), float(item.centroid[1])],
                 "colour": item.colour,
             }
             if action == "none":
@@ -349,6 +354,95 @@ def match(labelled: dict, detections: list[dict]) -> dict | None:
         if best_distance is None or distance < best_distance:
             best, best_distance = detection, distance
     return best
+
+
+def _iou(a, b) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    iw = max(0, min(ax2, bx2) - max(ax1, bx1))
+    ih = max(0, min(ay2, by2) - max(ay1, by1))
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    return inter / max(1, union)
+
+
+def repair(args) -> int:
+    """Recompute centroid_xy and true_angle_deg from the frames.
+
+    An early version of this tool stored the centroid with the bbox offset
+    added twice, which put it outside its own fruit - so nothing matched at
+    scoring time and every true_angle_deg was measured from the wrong origin.
+    The clicks themselves were always right: stem_xy is mapped straight from
+    the click into full-frame coordinates and never involved the centroid. So
+    the labels are repairable and nobody has to click anything again.
+
+    Re-run this after any labelling done with the broken version. It is
+    idempotent - a label already consistent with its fruit is left alone.
+    """
+    cfg = load_config(args.config)
+    settings = shape_settings(cfg)
+    out_dir = Path(args.out).resolve()
+    labels_path = out_dir / "stem_labels.json"
+    labels = load_labels(labels_path)
+    if not labels:
+        print(f"No labels in {labels_path}")
+        return 1
+
+    source = Path(args.frames).resolve()
+    fixed = already_fine = unmatched = 0
+    for name, entries in sorted(labels.items()):
+        if not entries:
+            continue
+        path = source / name
+        if not path.exists():
+            hits = list(source.rglob(name))
+            if not hits:
+                unmatched += len(entries)
+                continue
+            path = hits[0]
+        frame = cv2.imread(str(path))
+        if frame is None:
+            unmatched += len(entries)
+            continue
+        fruit = classical.find_fruit(frame, **settings)
+        for entry in entries:
+            box = entry.get("bbox")
+            if not box:
+                unmatched += 1
+                continue
+            gx, gy = entry.get("centroid_xy", (0.0, 0.0))
+            if box[0] <= gx <= box[2] and box[1] <= gy <= box[3]:
+                already_fine += 1
+                continue
+            # Matched on the stored bbox rather than on position, because the
+            # stored centroid is exactly the thing that cannot be trusted here.
+            best, best_iou = None, 0.0
+            for item in fruit:
+                overlap = _iou(box, item.bbox)
+                if overlap > best_iou:
+                    best, best_iou = item, overlap
+            if best is None or best_iou < 0.5:
+                unmatched += 1
+                continue
+            entry["centroid_xy"] = [float(best.centroid[0]), float(best.centroid[1])]
+            if entry.get("stem_xy"):
+                sx, sy = entry["stem_xy"]
+                cx, cy = entry["centroid_xy"]
+                entry["true_angle_deg"] = round(
+                    orient.vector_to_angle(sx - cx, sy - cy), 2
+                )
+            fixed += 1
+
+    save_labels(labels_path, labels)
+    print(f"repaired {fixed} label(s)")
+    print(f"already consistent: {already_fine}")
+    if unmatched:
+        print(f"could not match {unmatched} - their frames are missing or the "
+              f"detector no longer finds that fruit")
+    print(f"-> {labels_path}\n\nNow: python -m tools.label_stems --score")
+    return 0
 
 
 def score(args) -> int:
@@ -460,7 +554,13 @@ def main() -> int:
                         help="stop after this many fruit (0 = no limit)")
     parser.add_argument("--score", action="store_true",
                         help="score the detector against existing labels")
+    parser.add_argument("--repair", action="store_true",
+                        help="recompute centroid_xy and true_angle_deg from the "
+                             "frames; fixes labels taken with the buggy first "
+                             "version without re-clicking anything")
     args = parser.parse_args()
+    if args.repair:
+        return repair(args)
     return score(args) if args.score else label(args)
 
 
