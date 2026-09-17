@@ -5,6 +5,7 @@ Label the true stem position, so angle accuracy can be measured
     python -m tools.label_stems data/raw --blossom        blossom pass
     python -m tools.label_stems --score                   accuracy report
     python -m tools.label_stems --reset-blossom           redo the blossom pass
+    python -m tools.label_stems --verify                  check labels before training
     python -m tools.label_stems data/raw --repair         fix old labels
 
 One click per fruit, on the base of the stem where it meets the body. The true
@@ -478,6 +479,108 @@ def match(labelled: dict, detections: list[dict]) -> dict | None:
     return best
 
 
+def verify(args) -> int:
+    """Look for systematic labelling mistakes before a training run.
+
+    Cheap to run, and the alternative is discovering a convention error after
+    an hour of training and a confusing validation curve. Everything here is a
+    consistency check between the two landmarks and the fruit they belong to -
+    none of it needs the frames, so it is instant.
+
+    None of these are automatically wrong. A paprika really can be almost
+    round, and on a fruit seen end-on the two landmarks SHOULD sit on top of
+    each other. They are prompts to open a handful and look.
+    """
+    out_dir = Path(args.out).resolve()
+    labels = load_labels(out_dir / "stem_labels.json")
+    if not labels:
+        print(f"No labels in {out_dir / 'stem_labels.json'}")
+        return 1
+
+    fruit = [e for entries in labels.values() for e in entries]
+    calyx = [e for e in fruit if e.get(CALYX_KEY)]
+    blossom = [e for e in fruit if e.get(BLOSSOM_KEY)]
+    both = [e for e in fruit if e.get(CALYX_KEY) and e.get(BLOSSOM_KEY)]
+    occluded = [e for e in fruit
+                if e.get("stem_vis") == 1 or e.get("blossom_vis") == 1]
+
+    print(f"{len(labels)} frame(s), {len(fruit)} fruit")
+    print(f"   {len(calyx):>4} with a calyx")
+    print(f"   {len(blossom):>4} with a blossom")
+    print(f"   {len(both):>4} with both        <- these are what train the flip")
+    print(f"   {len(occluded):>4} carry an occluded (right-click) landmark")
+
+    problems: list[str] = []
+    if len(both) < len(calyx):
+        problems.append(
+            f"{len(calyx) - len(both)} fruit have a calyx but no blossom - "
+            f"run --blossom to finish them")
+    if not occluded:
+        problems.append(
+            "no occluded landmarks at all. dataset_check rejects a set like "
+            "this: it means hidden landmarks were skipped rather than "
+            "positioned, so standing and stem-away fruit can never be learnt "
+            "(ANNOTATION_SPEC section 3)")
+
+    # --- geometry, per fruit ------------------------------------------------
+    same_side = []
+    outside = []
+    tiny_gap = []
+    for entry in both:
+        sx, sy = entry[CALYX_KEY]
+        bx, by = entry[BLOSSOM_KEY]
+        gx, gy = entry.get("centroid_xy", ((sx + bx) / 2, (sy + by) / 2))
+        x1, y1, x2, y2 = entry["bbox"]
+        diagonal = math.hypot(max(1, x2 - x1), max(1, y2 - y1))
+
+        # The two landmarks are opposite ends of one fruit, so seen from the
+        # centre they should point in roughly opposite directions. Both on the
+        # same side is the mistake this pass exists to catch: a blossom clicked
+        # next to the calyx instead of across from it.
+        calyx_angle = orient.vector_to_angle(sx - gx, sy - gy)
+        blossom_angle = orient.vector_to_angle(bx - gx, by - gy)
+        separation = orient.angular_difference(calyx_angle, blossom_angle)
+        gap = math.hypot(sx - bx, sy - by) / diagonal
+        if gap > 0.15 and separation < 90.0:
+            same_side.append((entry, separation))
+        if gap <= 0.15:
+            tiny_gap.append(entry)
+        for name, (px, py) in ((CALYX_KEY, (sx, sy)), (BLOSSOM_KEY, (bx, by))):
+            pad_x, pad_y = (x2 - x1) * 0.25, (y2 - y1) * 0.25
+            if not (x1 - pad_x <= px <= x2 + pad_x and y1 - pad_y <= py <= y2 + pad_y):
+                outside.append((entry, name))
+
+    print()
+    if same_side:
+        print(f"!! {len(same_side)} fruit have BOTH landmarks on the same side of "
+              f"the centre,")
+        print(f"   yet far apart. On a fruit lying down they should be roughly "
+              f"opposite.")
+        print(f"   Most likely the blossom was clicked near the calyx rather than "
+              f"across from it.")
+        for entry, sep in sorted(same_side, key=lambda x: x[1])[:5]:
+            print(f"      {sep:5.0f} deg apart   bbox {entry['bbox']}")
+    if tiny_gap:
+        print(f"\n   {len(tiny_gap)} fruit have the landmarks nearly on top of each "
+              f"other.")
+        print(f"   That is CORRECT for a fruit seen end-on and wrong for one lying "
+              f"down -")
+        print(f"   check a couple, and check they carry an occluded flag.")
+    if outside:
+        print(f"\n!! {len(outside)} landmark(s) sit well outside their own fruit's box.")
+        for entry, which in outside[:5]:
+            print(f"      {which} at {[round(v) for v in entry[which]]} "
+                  f"vs bbox {entry['bbox']}")
+
+    print()
+    for line in problems:
+        print(f"!! {line}")
+    if not problems and not same_side and not outside:
+        print("No systematic problems found. Export it:")
+        print("   python -m tools.export_dataset data/raw")
+    return 0
+
+
 def reset_blossom(args) -> int:
     """Clear every blossom landmark so the second pass can be redone.
 
@@ -746,6 +849,9 @@ def main() -> int:
     parser.add_argument("--worst", type=int, default=10,
                         help="with --score, list this many worst PLACED fruit by "
                              "name so they can be looked at (0 = none)")
+    parser.add_argument("--verify", action="store_true",
+                        help="check the labels for systematic mistakes before "
+                             "exporting or training")
     parser.add_argument("--reset-blossom", action="store_true",
                         help="clear every blossom landmark so the second pass "
                              "can be redone. Calyx labels are kept and the file "
@@ -755,6 +861,8 @@ def main() -> int:
                              "frames; fixes labels taken with the buggy first "
                              "version without re-clicking anything")
     args = parser.parse_args()
+    if args.verify:
+        return verify(args)
     if args.reset_blossom:
         return reset_blossom(args)
     if args.repair:
