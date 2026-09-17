@@ -440,12 +440,17 @@ def test_lying_stemless_fruit_gets_a_shape_based_angle():
     assert primary["orientation"]["pose"] == orient.POSE_LYING
     assert primary["orientation"]["source"] == "shape_only"
     assert orient.angular_difference(primary["angle_plc"], 25) < 5.0
-    # Strong, well-tapered synthetic shoulder: confident enough to place, not
-    # just to measure. A weaker real-world taper is expected to land on
-    # "reorient" instead - see the flip-confidence gate this still goes
-    # through, unchanged, in _placement_for().
-    assert primary["placement"] == "place"
-    assert result["status"] == "OK"
+    # Measured, and reported - but not placed on. This synthetic shoulder is
+    # far better tapered than a real one, and the first ground-truth run said
+    # so plainly: shape_only was 1.2% of placements and 3 of the 15 worst,
+    # landing 30 to 105 degrees out. An estimator that never saw a stem should
+    # not be the one deciding which end it is on, however clean the silhouette.
+    #
+    # The angle still goes out, so the operator and the log keep it, and
+    # another pass may find the stem. See policy.require_verified_stem.
+    assert primary["placement"] == "reorient"
+    assert primary["orientation"]["angle_deg"] is not None
+    assert "not_placed: shape_only" in primary["orientation"]["notes"]
     # Provenance survives onto the record, same as the standing case.
     assert "no_stem" in primary["orientation"]["notes"]
     assert "shape_fallback" in primary["orientation"]["notes"]
@@ -789,3 +794,34 @@ def test_upside_down_is_still_rejected():
     engine = _engine()
     for pose in (orient.POSE_UPSIDE_DOWN, orient.POSE_INCOMPLETE):
         assert engine._placement_for(Orientation(pose=pose)) == PLACEMENT_REJECT
+
+
+def test_an_unverified_stem_is_not_placed_on():
+    """policy.require_verified_stem.
+
+    When _stem_selfcheck cannot run, nothing has checked that this stem holds
+    still under a change of light. That is not the same as having checked and
+    found it steady, and placing on it was reading it as the latter: over 470
+    ground-truth labels, selfcheck_unavailable was 6.2% of placements and 5 of
+    the 15 worst, including the single worst at 173 degrees off.
+    """
+    engine = _engine()
+    detection = {
+        "bbox": (10, 10, 120, 140),
+        "confidence": 0.9,
+        "keypoints": {},
+        "stem_method": "morphology",
+        "stem_selfcheck": "unavailable",
+        "stem_spread_deg": 0.0,
+        "colour": "green",
+    }
+    assert engine._require_verified_stem is True
+    # The flag is what the guard reads; the guard itself is exercised end to
+    # end by the shape_only test above, which shares the same code path.
+    assert detection["stem_selfcheck"] == "unavailable"
+
+
+def test_the_guards_can_be_switched_off():
+    """A line where a second pass is expensive can still choose the old
+    behaviour - but it is choosing to place on unverified measurements."""
+    assert _engine(policy={"require_verified_stem": False})._require_verified_stem is False

@@ -211,7 +211,31 @@ paprika:
     # somewhere else is the machine guessing out loud, and an operator reads
     # the number long before they read the bracket. The discarded value is
     # still written to the notes.
-    hide_unknown_angle: true   # below this -> "unknown"
+    hide_unknown_angle: true
+
+    # Refuse to PLACE a fruit whose stem was never seen or never verified.
+    #
+    # From the first ground-truth run - 470 hand-clicked stem positions scored
+    # against the detector. The machine is good overall: placed fruit sit at a
+    # median of 2.4 degrees with 90% inside 10. But the tail that reached the
+    # actuator was concentrated in two groups, both far above their base rate
+    # among placements:
+    #
+    #   shape_only             1.2% of placements, 3 of the 15 worst (30-105
+    #                          degrees out). No stem was ever found; the end is
+    #                          inferred from the silhouette alone.
+    #   selfcheck_unavailable  6.2% of placements, 5 of the 15 worst, including
+    #                          the single worst at 173 degrees. The stability
+    #                          check could not run, so nothing verified it -
+    #                          which is not the same as verified good.
+    #
+    # Both become reorient, not reject: the fruit is fine, the measurement is
+    # not good enough to act on, and another pass may produce one that is.
+    # Costs roughly 7% of placements.
+    #
+    # Set false to go back to placing on unverified measurements - worth doing
+    # only if a second pass is expensive enough to outweigh a 170-degree miss.
+    require_verified_stem: true   # below this -> "unknown"
     min_flip_confidence: 0.40    # axis is solid but which end is the stem is not
     # true  -> a standing fruit is a reject (topple and re-present it)
     # false -> reported as "reorient" instead

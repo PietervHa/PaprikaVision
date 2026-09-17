@@ -162,6 +162,10 @@ class PaprikaEngine:
         # relied on invites somebody to rely on it, which is the whole reason
         # these verdicts exist.
         self._hide_unknown_angle = bool(policy.get("hide_unknown_angle", True))
+        # Refuse to PLACE on a stem that was never verified, or never seen.
+        self._require_verified_stem = bool(
+            policy.get("require_verified_stem", True)
+        )
         self._min_flip_confidence = float(policy.get("min_flip_confidence", 0.40))
         self._reject_standing = bool(policy.get("reject_standing", True))
         # A fruit whose stem could not be found is not the same as a fruit that
@@ -668,6 +672,36 @@ class PaprikaEngine:
                 )
                 result = from_grooves
                 placement = self._placement_for(result)
+
+        # Two guards on PLACING, both from the first ground-truth measurement
+        # this project has had: 470 hand-clicked stem positions scored against
+        # the detector. Overall the machine is good - placed fruit sit at a
+        # median of 2.4 degrees and 90% inside 10 - but the tail reaching the
+        # actuator was concentrated in two identifiable groups.
+        #
+        # shape_only: the stemless fallback. No stem was found, so the end is
+        # inferred from the silhouette alone. It was 1.2% of placements and 3
+        # of the 15 worst, landing 30 to 105 degrees out. An estimator that
+        # never saw a stem should not be trusted to say which end it is on.
+        #
+        # selfcheck_unavailable: the stability check could not run, so nothing
+        # verified this stem. 6.2% of placements and 5 of the 15 worst,
+        # including the single worst at 173 degrees off. Unverified is not the
+        # same as verified-good, and placing on it was reading it as the latter.
+        #
+        # Both fall back to reorient rather than reject: the fruit is fine, the
+        # measurement is simply not good enough to act on, and another pass may
+        # produce one that is. Costs about 7% of placements on the test set.
+        if placement == PLACEMENT_PLACE:
+            if self._require_verified_stem and result.source == "shape_only":
+                placement = PLACEMENT_REORIENT
+                result.notes.append("not_placed: shape_only")
+            elif (
+                self._require_verified_stem
+                and str(detection.get("stem_selfcheck", "skipped")) == "unavailable"
+            ):
+                placement = PLACEMENT_REORIENT
+                result.notes.append("not_placed: stem unverified")
 
         # Below the usable floor the angle is withdrawn, not merely flagged.
         # Leaving it in the result means the HMI dial still swings to it and
