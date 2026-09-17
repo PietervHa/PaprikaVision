@@ -1,9 +1,10 @@
 """
 Label the true stem position, so angle accuracy can be measured
 
-    python -m tools.label_stems data/raw
-    python -m tools.label_stems data/raw --colour green --limit 200
-    python -m tools.label_stems --score
+    python -m tools.label_stems data/raw                  calyx pass
+    python -m tools.label_stems data/raw --blossom        blossom pass
+    python -m tools.label_stems --score                   accuracy report
+    python -m tools.label_stems data/raw --repair         fix old labels
 
 One click per fruit, on the base of the stem where it meets the body. The true
 angle follows from that point and the fruit's own centroid, which is the same
@@ -91,6 +92,15 @@ CROP_MARGIN = 0.12
 
 NO_STEM = "no_stem_visible"
 
+# Names match docs/ANNOTATION_SPEC.md, which fixes the order and warns that
+# changing it means re-exporting. stem_end is the CALYX - where the stem meets
+# the shoulder - not the tip of the stem. Stem length varies enormously and
+# stems snap off in handling, so a tip label moves the target depending on how
+# roughly the fruit was picked; the calyx is on every fruit, always in the same
+# anatomical place.
+CALYX_KEY = "stem_xy"
+BLOSSOM_KEY = "blossom_xy"
+
 
 def load_config(explicit: str | None) -> dict:
     import yaml
@@ -149,19 +159,99 @@ def save_labels(path: Path, labels: dict) -> None:
 
 
 class _Clicker:
-    """Collects one click, in view coordinates."""
+    """Collects one click, in view coordinates, with which button was used.
+
+    Two buttons rather than a mode key, because the distinction is made on
+    almost every fruit and a mode is something you forget you are in.
+
+        left   the landmark is visible - I can see it          -> flag 2
+        right  it is hidden, but I know where it is            -> flag 1
+
+    ANNOTATION_SPEC section 3 turns on that second case. On a standing or
+    stem-away fruit one landmark is always hidden and its position is still
+    knowable, and a pose model can be taught to predict it. Skipping those
+    instead of positioning them teaches the model that every fruit shows both
+    ends, which is the opposite of what this dataset is for.
+    """
 
     def __init__(self) -> None:
         self.point: tuple[int, int] | None = None
+        self.visibility: int = 2
 
     def __call__(self, event, x, y, flags, param) -> None:
         if event == cv2.EVENT_LBUTTONDOWN:
-            self.point = (x, y)
+            self.point, self.visibility = (x, y), 2
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            self.point, self.visibility = (x, y), 1
 
 
-def draw_instructions(view: np.ndarray, caption: str) -> np.ndarray:
+_CLICKER = _Clicker()
+
+
+def _blossom_pass(frame, path, todo, labelled, args):
+    """Second landmark on fruit that already carry a calyx.
+
+    Returns None if the operator asked to quit. The calyx is drawn on the crop
+    while clicking, because the two landmarks are opposite ends of the same
+    fruit and a blossom clicked on the same side as the calyx is the one
+    mistake worth making impossible to miss.
+    """
+    height, width = frame.shape[:2]
+    for index, entry in enumerate(todo):
+        x1, y1, x2, y2 = entry["bbox"]
+        pad_x = int((x2 - x1) * CROP_MARGIN)
+        pad_y = int((y2 - y1) * CROP_MARGIN)
+        cx1, cy1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
+        cx2, cy2 = min(width, x2 + pad_x), min(height, y2 + pad_y)
+        crop = frame[cy1:cy2, cx1:cx2]
+        if crop.size == 0:
+            continue
+        scale = VIEW_HEIGHT / crop.shape[0]
+        view = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+
+        calyx = entry[CALYX_KEY]
+        cv2.circle(view, (int((calyx[0] - cx1) * scale), int((calyx[1] - cy1) * scale)),
+                   9, (80, 220, 80), 2)
+        gx, gy = entry["centroid_xy"]
+        cv2.circle(view, (int((gx - cx1) * scale), int((gy - cy1) * scale)),
+                   6, (255, 200, 0), -1)
+
+        caption = (f"{path.name}   blossom {index + 1}/{len(todo)}   "
+                   f"[{labelled} done]   green ring = calyx you marked")
+        _CLICKER.point = None
+        action = None
+        while action is None:
+            cv2.imshow("label", draw_instructions(view, caption, blossom=True))
+            key = cv2.waitKey(20) & 0xFF
+            if _CLICKER.point is not None:
+                action = "click"
+            elif key in (ord("q"), 27):
+                return None
+            elif key == ord("n"):
+                action = "none"
+            elif key == ord("s"):
+                action = "skip"
+
+        if action == "skip":
+            continue
+        if action == "none":
+            entry[BLOSSOM_KEY] = None
+            entry["blossom_note"] = "not_visible"
+            continue
+        vx, vy = _CLICKER.point
+        entry[BLOSSOM_KEY] = [float(cx1 + vx / scale), float(cy1 + vy / scale)]
+        entry["blossom_vis"] = _CLICKER.visibility
+    return todo
+
+
+def draw_instructions(view: np.ndarray, caption: str, blossom: bool = False) -> np.ndarray:
     panel = view.copy()
-    lines = [caption, "click the STEM BASE   n = no stem   s = skip   u = undo   q = save+quit"]
+    what = ("BLOSSOM SCAR:  left = visible   right = hidden, you know where   "
+            "n = truly absent   s = skip   q = save+quit"
+            if blossom else
+            "STEM BASE (calyx):  left = visible   right = hidden, you know where   "
+            "n = no stem   s = skip   u = undo   q = save+quit")
+    lines = [caption, what]
     for index, text in enumerate(lines):
         y = 26 + index * 26
         cv2.putText(panel, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 0, 0), 4)
@@ -201,7 +291,7 @@ def label(args) -> int:
               "opencv-python-headless has no GUI; install opencv-python instead.")
         return 1
 
-    clicker = _Clicker()
+    clicker = _CLICKER
     cv2.setMouseCallback("label", clicker)
 
     # (frame_name, fruit_record) queued up so undo can step back across frames.
@@ -212,7 +302,17 @@ def label(args) -> int:
     for path in frames:
         if quit_now:
             break
-        if path.name in labels and labels[path.name]:
+        existing = labels.get(path.name)
+        if args.blossom:
+            # The blossom pass tops up fruit already carrying a calyx, rather
+            # than starting again. Anything with no calyx label has nothing to
+            # top up, and anything already carrying a blossom is done.
+            if not existing:
+                continue
+            if all(e.get(BLOSSOM_KEY) is not None or not e.get(CALYX_KEY)
+                   for e in existing):
+                continue
+        elif existing:
             continue                                   # resumable: already done
         if args.limit and labelled >= args.limit:
             break
@@ -220,6 +320,20 @@ def label(args) -> int:
         frame = cv2.imread(str(path))
         if frame is None:
             print(f"  ! could not read {path.name}")
+            continue
+
+        if args.blossom:
+            # Driven by the stored labels, not by a fresh detection run: these
+            # fruit were already chosen and clicked once, and re-detecting
+            # could return a different set.
+            todo = [e for e in existing
+                    if e.get(CALYX_KEY) and e.get(BLOSSOM_KEY) is None]
+            entries = _blossom_pass(frame, path, todo, labelled, args)
+            if entries is None:
+                quit_now = True
+            labelled += sum(1 for e in todo if e.get(BLOSSOM_KEY) is not None)
+            labels[path.name] = existing
+            save_labels(labels_path, labels)
             continue
 
         fruit = classical.find_fruit(frame, **settings)
@@ -309,6 +423,7 @@ def label(args) -> int:
                 vx, vy = clicker.point
                 # Back to full-frame coordinates, which is what gets stored.
                 record["stem_xy"] = [float(cx1 + vx / scale), float(cy1 + vy / scale)]
+                record["stem_vis"] = clicker.visibility
                 sx, sy = record["stem_xy"]
                 gx, gy = record["centroid_xy"]
                 record["true_angle_deg"] = round(orient.vector_to_angle(sx - gx, sy - gy), 2)
@@ -323,9 +438,15 @@ def label(args) -> int:
     cv2.destroyAllWindows()
     save_labels(labels_path, labels)
     total = sum(len(v) for v in labels.values())
-    with_stem = sum(1 for v in labels.values() for r in v if r.get("stem_xy"))
+    with_stem = sum(1 for v in labels.values() for r in v if r.get(CALYX_KEY))
+    with_blossom = sum(1 for v in labels.values() for r in v if r.get(BLOSSOM_KEY))
     print(f"\n{labelled} fruit labelled this session")
-    print(f"{total} in the file, {with_stem} of them with a stem marked")
+    print(f"{total} in the file, {with_stem} with a calyx, "
+          f"{with_blossom} with a blossom")
+    if with_blossom < with_stem:
+        print(f"{with_stem - with_blossom} still need a blossom before they can "
+              f"be exported for training:")
+        print("   python -m tools.label_stems data/raw --blossom")
     print(f"-> {labels_path}")
     print("\nScore the detector against them with:")
     print("   python -m tools.label_stems --score")
@@ -572,6 +693,10 @@ def main() -> int:
                         help="only label fruit of this colour, e.g. green")
     parser.add_argument("--limit", type=int, default=0,
                         help="stop after this many fruit (0 = no limit)")
+    parser.add_argument("--blossom", action="store_true",
+                        help="second pass: click blossom_end on fruit that "
+                             "already have a calyx. Needed for training - the "
+                             "pose model wants both landmarks.")
     parser.add_argument("--score", action="store_true",
                         help="score the detector against existing labels")
     parser.add_argument("--worst", type=int, default=10,
