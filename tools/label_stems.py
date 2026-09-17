@@ -4,6 +4,7 @@ Label the true stem position, so angle accuracy can be measured
     python -m tools.label_stems data/raw                  calyx pass
     python -m tools.label_stems data/raw --blossom        blossom pass
     python -m tools.label_stems --score                   accuracy report
+    python -m tools.label_stems --reset-blossom           redo the blossom pass
     python -m tools.label_stems data/raw --repair         fix old labels
 
 One click per fruit, on the base of the stem where it meets the body. The true
@@ -477,6 +478,49 @@ def match(labelled: dict, detections: list[dict]) -> dict | None:
     return best
 
 
+def reset_blossom(args) -> int:
+    """Clear every blossom landmark so the second pass can be redone.
+
+    Calyx labels are left completely alone. They are the expensive half - one
+    careful click each on the anatomical landmark the spec names - and a change
+    of mind about the blossom convention is no reason to throw them away.
+
+    The file is copied to a timestamped backup first. Labelling is hours of
+    work and this is the one command here that destroys any of it, so it never
+    destroys the only copy.
+    """
+    out_dir = Path(args.out).resolve()
+    labels_path = out_dir / "stem_labels.json"
+    labels = load_labels(labels_path)
+    if not labels:
+        print(f"No labels in {labels_path}")
+        return 1
+
+    from datetime import datetime
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = labels_path.with_name(f"stem_labels.backup-{stamp}.json")
+    backup.write_text(labels_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    cleared = kept = 0
+    for entries in labels.values():
+        for entry in entries:
+            if entry.pop(BLOSSOM_KEY, None) is not None:
+                cleared += 1
+            entry.pop("blossom_vis", None)
+            entry.pop("blossom_note", None)
+            if entry.get(CALYX_KEY):
+                kept += 1
+    save_labels(labels_path, labels)
+
+    print(f"cleared {cleared} blossom label(s)")
+    print(f"{kept} calyx label(s) kept, untouched")
+    print(f"backup of the previous file: {backup.name}")
+    print("\nNow redo the blossom pass:")
+    print("   python -m tools.label_stems data/raw --blossom")
+    return 0
+
+
 def _iou(a, b) -> float:
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
@@ -702,11 +746,17 @@ def main() -> int:
     parser.add_argument("--worst", type=int, default=10,
                         help="with --score, list this many worst PLACED fruit by "
                              "name so they can be looked at (0 = none)")
+    parser.add_argument("--reset-blossom", action="store_true",
+                        help="clear every blossom landmark so the second pass "
+                             "can be redone. Calyx labels are kept and the file "
+                             "is backed up first.")
     parser.add_argument("--repair", action="store_true",
                         help="recompute centroid_xy and true_angle_deg from the "
                              "frames; fixes labels taken with the buggy first "
                              "version without re-clicking anything")
     args = parser.parse_args()
+    if args.reset_blossom:
+        return reset_blossom(args)
     if args.repair:
         return repair(args)
     return score(args) if args.score else label(args)
