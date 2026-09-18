@@ -82,7 +82,7 @@ class Findings:
     def note(self, message: str) -> None:
         self.notes.append(message)
 
-    def report(self) -> int:
+    def report(self, acknowledged: bool = False) -> int:
         for message in self.notes:
             print(f"  {message}")
         if self.warnings:
@@ -94,8 +94,21 @@ class Findings:
             for message in self.errors:
                 print(f"  X {message}")
         print()
+        if self.errors and acknowledged:
+            # The errors are still printed in full above. What --i-know-better
+            # changes is only the exit code, so a deliberate decision to train
+            # on a limited dataset stops blocking a script - it does not hide
+            # what the dataset cannot do. Anything trained from here carries
+            # the limitation, and the model will not mention it later.
+            print("RESULT: NOT ready by the checks above - proceeding anyway "
+                  "because you asked.")
+            print(f"        {len(self.errors)} error(s) accepted. Write down "
+                  f"which ones, next to the weights.")
+            return 0
         if self.errors:
             print("RESULT: not ready to train - fix the errors above.")
+            print("        If the limitation is one you accept deliberately, "
+                  "re-run with --i-know-better.")
             return 1
         if self.warnings:
             print("RESULT: trainable, but read the warnings first.")
@@ -473,6 +486,10 @@ def evaluate(stats: dict, findings: Findings, split_name: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset", type=Path, help="dataset root (contains train/ and val/)")
+    parser.add_argument("--i-know-better", action="store_true",
+                        help="print the errors as usual but exit 0, for a "
+                             "limitation you have decided to accept. Does not "
+                             "silence anything.")
     args = parser.parse_args()
 
     root: Path = args.dataset
@@ -501,7 +518,7 @@ def main() -> int:
                 "Expected a YOLO layout."
             )
 
-    return findings.report()
+    return findings.report(acknowledged=args.i_know_better)
 
 
 if __name__ == "__main__":
