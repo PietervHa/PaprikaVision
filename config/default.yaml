@@ -32,7 +32,7 @@ paprika:
   #                because the true angle is known exactly, any mismatch at the
   #                PLC end is a convention bug, not a detection bug.
   # ---------------------------------------------------------------------------
-  backend: "pose"
+  backend: "shape"
 
   confidence: 0.45          # detector confidence floor (pose backend)
   max_detections: 8
@@ -557,6 +557,43 @@ debug:
   # genuinely tight, and then treat small angle differences with suspicion.
   image_format: "png"
   jpeg_quality: 95
+
+# -----------------------------------------------------------------------------
+# capture: press a key to keep the frame in front of you.
+#
+# For fruit the detector gets wrong. By the time anyone reaches a terminal the
+# belt has moved on and the frame is gone, so the failure gets described from
+# memory instead of reproduced - and a failure that cannot be reproduced cannot
+# be fixed.
+#
+# Saves the RAW frame, no overlay: an overlaid frame is a picture of an answer
+# and cannot be re-run, re-labelled or trained on. The overlay goes in the
+# sidecar JSON instead.
+#
+# Feed them back with:
+#   python -m tools.label_stems data/captures
+#   python -m tools.export_dataset data/captures --out data/datasets/paprika_v2
+# -----------------------------------------------------------------------------
+capture:
+  enabled: true
+  # Anything the keyboard package understands: "c", "f12", "ctrl+shift+s".
+  # Avoid "q" - that is the manual vision trigger.
+  hotkey: "c"
+  directory: "data/captures"
+  save_result_json: true
+
+  # png or jpg. Default png, and measured rather than assumed: these frames are
+  # an input to segmentation and to a model, and re-encoding moves the answer.
+  # Over ten fruit, JPEG at quality 95 shifted the reported stem angle by up to
+  # 4.1 degrees and at quality 80 by 8.1; PNG shifted it by exactly zero on
+  # every one. Against a max_stem_spread_deg of 6.0 that is not a rounding
+  # difference. Costs about 1.2 MB a frame against 160 KB.
+  image_format: "png"
+  jpeg_quality: 95
+
+  # Two presses inside this window count as one. A held key repeats, and an
+  # operator reaching across a machine does not press cleanly.
+  min_interval_s: 0.75
 
 database:
   url: "sqlite:///data/results.db"
