@@ -11,3 +11,5 @@ data/raw/
 models/*.pt
 runs/
 .pytest_cache/
+/yolo11n-pose.pt
+/yolo11n.pt
