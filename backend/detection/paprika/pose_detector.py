@@ -38,6 +38,7 @@ from backend.detection.paprika import classical
 from backend.detection.paprika import orientation as orient
 from backend.detection.paprika.orientation import Keypoint
 from backend.utils.logger import get_logger
+from backend.utils.paths import project_path
 
 log = get_logger(__name__)
 
@@ -81,7 +82,7 @@ class PaprikaDetector:
         )
 
         pose_cfg = cfg_block.get("pose") if isinstance(cfg_block.get("pose"), dict) else {}
-        self._model_path = str(pose_cfg.get("model_path", "models/paprika_pose.pt"))
+        self._model_path = str(project_path(pose_cfg.get("model_path"), "models/paprika_pose.pt"))
         self._imgsz = int(pose_cfg.get("imgsz", 640))
         self._kp_confidence = float(pose_cfg.get("keypoint_confidence", 0.30))
 
