@@ -13,3 +13,4 @@ runs/
 .pytest_cache/
 /yolo11n-pose.pt
 /yolo11n.pt
+/data/captures/
