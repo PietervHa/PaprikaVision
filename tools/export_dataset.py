@@ -2,7 +2,11 @@
 Build a YOLO-pose training set from hand labels
 
     python -m tools.export_dataset data/raw
-    python -m tools.export_dataset data/raw --out data/datasets/paprika --val 0.2
+    python -m tools.export_dataset data/raw data/captures --out data/datasets/v2
+
+Pass every folder that holds labelled frames. Exporting captures ALONE builds a
+dataset of nothing but the cases the detector already fails on, and a model
+trained only on hard examples loses the easy ones it used to get right.
 
 Merges the landmarks clicked with tools/label_stems.py over the automatic
 guesses from tools/pre_annotate.py, and writes a dataset ultralytics can train
@@ -98,6 +102,22 @@ def shape_settings(cfg: dict) -> dict:
     }
 
 
+def as_arg(path: Path) -> str:
+    """Render a path so it survives being pasted into a shell.
+
+    Relative to the current directory when it sits underneath it, because a
+    short relative path is both easier to read and free of the space in
+    "C:/Users/Pieter van Haaften" that splits an unquoted argument into two.
+    Quoted whenever a space survives anyway. Printing a bare absolute path was
+    handing people a command that could not work.
+    """
+    try:
+        rendered = path.resolve().relative_to(Path.cwd()).as_posix()
+    except ValueError:
+        rendered = path.resolve().as_posix()
+    return f'"{rendered}"' if " " in rendered else rendered
+
+
 def iou(a, b) -> float:
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
@@ -139,15 +159,17 @@ def export(args) -> int:
     cfg = load_config(args.config)
     settings = shape_settings(cfg)
 
-    source = Path(args.frames).resolve()
+    folders = [Path(f).resolve() for f in
+               ([args.frames] if isinstance(args.frames, str) else args.frames)]
     out_dir = Path(args.out).resolve()
-    if not source.exists():
-        print(f"Source folder does not exist: {source}")
-        return 1
-    if out_dir == source or source in out_dir.parents:
-        print(f"Refusing to write inside the source folder.\n"
-              f"  source: {source}\n  out:    {out_dir}")
-        return 1
+    for source in folders:
+        if not source.exists():
+            print(f"Source folder does not exist: {source}")
+            return 1
+        if out_dir == source or source in out_dir.parents:
+            print(f"Refusing to write inside the source folder.\n"
+                  f"  source: {source}\n  out:    {out_dir}")
+            return 1
 
     labels_path = Path(args.labels).resolve() / "stem_labels.json"
     if not labels_path.exists():
@@ -164,7 +186,16 @@ def export(args) -> int:
     fruit_total = both = calyx_only = neither = 0
     skipped_no_label = 0
 
-    frames = sorted(p for p in source.rglob("*") if p.suffix.lower() in IMAGE_SUFFIXES)
+    # Several folders, deduplicated by filename. The labels are keyed by
+    # filename, so two folders holding the same frame would otherwise export it
+    # twice and could land the copies on opposite sides of the train/val split
+    # - which is the near-duplicate leak the frame-level split exists to stop.
+    seen: dict[str, Path] = {}
+    for source in folders:
+        for candidate in sorted(source.rglob("*")):
+            if candidate.suffix.lower() in IMAGE_SUFFIXES:
+                seen.setdefault(candidate.name, candidate)
+    frames = [seen[name] for name in sorted(seen)]
     for path in frames:
         entries = hand.get(path.name)
         if not entries:
@@ -245,7 +276,8 @@ def export(args) -> int:
         encoding="utf-8",
     )
 
-    print(f"{len(frames)} frame(s) under {source} (unchanged)")
+    print(f"{len(frames)} frame(s) from "
+          f"{', '.join(f.name for f in folders)} (unchanged)")
     if skipped_no_label:
         print(f"{skipped_no_label} had no hand labels and were skipped")
     print(f"\nwritten: {collections_counter['train']} train, "
@@ -261,8 +293,9 @@ def export(args) -> int:
               f"invented - but the\nmodel learns the flip from pairs, so top them up first:")
         print("   python -m tools.label_stems data/raw --blossom")
     print("\nCheck it, then train:")
-    print(f"   python -m tools.dataset_check {out_dir}")
-    print(f"   yolo pose train data={data_yaml.as_posix()} model=yolo11n-pose.pt epochs=100")
+    print(f"   python -m tools.dataset_check {as_arg(out_dir)}")
+    print(f"   yolo pose train data={as_arg(data_yaml)} "
+          f"model=yolo11n-pose.pt imgsz=640 epochs=100 patience=30")
     return 0
 
 
@@ -271,7 +304,11 @@ def main() -> int:
         description="Merge hand labels over pre-annotation into a YOLO-pose "
                     "dataset. Source frames are only ever read and copied."
     )
-    parser.add_argument("frames", nargs="?", default=str(project_path("data/raw")))
+    parser.add_argument("frames", nargs="*",
+                        default=[str(project_path("data/raw"))],
+                        help="one or more folders of frames. Pass BOTH the "
+                             "original corpus and any captures, so the model "
+                             "sees the easy cases as well as the hard ones.")
     parser.add_argument("--labels", default=str(project_path("data/debug/labels")),
                         help="folder holding stem_labels.json")
     parser.add_argument("--out", default=str(project_path("data/datasets/paprika")))
