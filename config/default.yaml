@@ -94,6 +94,32 @@ paprika:
   # called standing.
   min_span_ratio: 0.18
 
+  # Let the silhouette overrule a "lying" verdict on a fruit that is standing.
+  #
+  # Keypoints only report standing when the model puts the two landmarks nearly
+  # on top of each other, and the pose model has almost never seen that: its
+  # training set was 5.5% standing fruit and 0% occluded landmarks, so it has
+  # essentially no example of the two ends coinciding. It spreads them instead,
+  # and the fruit comes out "lying" with a guessed angle - or, when the
+  # landmarks are uncertain, as "human check needed".
+  #
+  # end_on.py reads the fruit's own outline and surface rather than its
+  # landmarks, so it does not share that blind spot. Measured at AUC 0.872
+  # leave-one-session-out on 254 hand-labelled crops.
+  #
+  # Consulted ONLY when the keypoints are unconvincing about lying - landmarks
+  # close together, or low pair confidence. That gate matters: on fruit with
+  # strong stem evidence the same classifier scores 0.84-0.98, higher than the
+  # fruit it is meant to catch, so letting it overrule a confident reading
+  # would cost more than it saves.
+  #
+  # Set false to trust the landmarks alone. Raise end_on_span_ratio_max or
+  # end_on_conf_max to consult the silhouette on more fruit, lower them to
+  # consult it on fewer.
+  end_on_overrides_lying: true
+  end_on_span_ratio_max: 0.45
+  end_on_conf_max: 0.55
+
   shape:
     # Belt hue range, EXCLUDED from the fruit mask. Measured on the real line:
     # the blue belt sits in a tight band at hue 100-125 (OpenCV 0-179 scale)

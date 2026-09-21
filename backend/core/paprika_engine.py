@@ -119,6 +119,31 @@ class PaprikaEngine:
         belt = shape_cfg.get("belt_hue") or [96, 145]
         self._belt_hue = (int(belt[0]), int(belt[1]))
         self._min_span_ratio = float(block.get("min_span_ratio", 0.18))
+        # A standing fruit is only recognised by keypoints when the model puts
+        # the two landmarks nearly on top of each other. The pose model has
+        # almost never seen that: its training set was 5.5% standing fruit and
+        # 0% occluded landmarks, so it has essentially no example of the two
+        # ends coinciding and it spreads them apart instead. The fruit then
+        # comes out "lying" with a guessed angle, or - when the landmarks are
+        # uncertain - as "human check needed".
+        #
+        # The silhouette does not have that blind spot. end_on.py reads the
+        # fruit's own outline and surface, is backend-independent, and was
+        # measured at AUC 0.872 leave-one-session-out. Consulting it when the
+        # keypoint evidence for "lying" is weak recovers exactly the case the
+        # training data is missing, without waiting for more labels.
+        self._end_on_overrides_lying = bool(
+            block.get("end_on_overrides_lying", True)
+        )
+        # Only consulted when the keypoints are UNCONVINCING about lying.
+        # Measured previously: on fruit with strong stem evidence the end-on
+        # classifier scores 0.84-0.98, higher than the fruit it is meant to
+        # catch, so it must never be allowed to overrule a confident reading.
+        # These two gates are what keep it on the population it works on.
+        self._end_on_span_ratio_max = float(
+            block.get("end_on_span_ratio_max", 0.45)
+        )
+        self._end_on_conf_max = float(block.get("end_on_conf_max", 0.55))
 
         # When the classical backend cannot find a stem at all on a fully-
         # visible fruit, ask the silhouette instead of rejecting outright: a
@@ -378,6 +403,63 @@ class PaprikaEngine:
 
         return None, []
 
+    def _reconsider_standing(self, frame, bbox, result, stem):
+        """Ask the silhouette whether a "lying" fruit is really standing.
+
+        Runs only when the keypoints are unconvincing: either the two landmarks
+        sit close together (already near the standing threshold) or the pair
+        confidence is low. A confident, well-separated pair is left alone,
+        because the end-on classifier is measurably unreliable on fruit whose
+        stem evidence is strong and would overrule good readings.
+
+        Which end is up comes from the stem landmark's own visibility, exactly
+        as keypoint_orientation decides it - a stem the model could see means
+        stem-up, one it placed but could not see means stem-down. That is the
+        occluded case ANNOTATION_SPEC section 3 describes, and it is the one
+        piece of this the model does report usefully even when it misplaces
+        the landmark.
+
+        The angle is withdrawn, not merely relabelled. A rotation angle for a
+        fruit standing on its end is not an unknown quantity, it is not a
+        quantity at all, and leaving a plausible number attached to a standing
+        verdict is how it ends up being read as one.
+        """
+        if not self._end_on_overrides_lying or result.pose != orient.POSE_LYING:
+            return result
+        if frame is None:
+            return result
+
+        x1, y1, x2, y2 = bbox
+        diagonal = math.hypot(max(1, x2 - x1), max(1, y2 - y1))
+        span_ratio = (result.stem_span_px or 0.0) / max(1.0, diagonal)
+        unconvincing = (
+            span_ratio < self._end_on_span_ratio_max
+            or result.confidence < self._end_on_conf_max
+        )
+        if not unconvincing:
+            return result
+
+        probability = self._end_on_probability(frame, bbox)
+        if probability is None:
+            return result
+        result.notes.append(f"end_on_p={probability:.2f}")
+        if probability <= self._end_on_threshold:
+            return result
+
+        stem_visible = bool(stem is not None and getattr(stem, "visible", False))
+        result.pose = (
+            orient.POSE_STANDING_STEM_UP if stem_visible
+            else orient.POSE_STANDING_STEM_DOWN
+        )
+        result.notes.append(
+            f"standing_from_silhouette (span_ratio={span_ratio:.2f}, "
+            f"was angle={result.angle_deg:.0f}deg)"
+            if result.angle_deg is not None else "standing_from_silhouette"
+        )
+        result.angle_deg = None
+        result.axis_deg = None
+        return result
+
     def _end_on_probability(self, frame, bbox) -> Optional[float]:
         """P(looking down this fruit's axis), or None when it cannot be read."""
         if frame is None:
@@ -601,6 +683,8 @@ class PaprikaEngine:
                 belt_hue=self._belt_hue,
                 min_span_ratio=self._min_span_ratio,
             )
+
+        result = self._reconsider_standing(frame, bbox, result, stem)
 
         placement = self._placement_for(result)
 
