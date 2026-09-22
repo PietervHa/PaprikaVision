@@ -32,7 +32,7 @@ paprika:
   #                because the true angle is known exactly, any mismatch at the
   #                PLC end is a convention bug, not a detection bug.
   # ---------------------------------------------------------------------------
-  backend: "pose"
+  backend: "shape"
 
   confidence: 0.45          # detector confidence floor (pose backend)
   max_detections: 8
@@ -59,7 +59,20 @@ paprika:
   # Re-measure with tools/tune_shape.py if you switch cultivar - it reports the
   # mean flip confidence per saturation floor, which is this decision in one
   # number. On a long, tapered pepper this estimator would earn its place again.
-  shape_crosscheck: false
+  # Run the silhouette estimator alongside the keypoints on every fruit.
+  #
+  # Now true. It was off because the silhouette used to be worse than useless -
+  # it pointed at the wrong end on 63% of fruit. Stripping the stem protrusion
+  # before the width profile fixed that, and 802 hand-labelled fruit since have
+  # shown what the second opinion is actually worth: not a better angle, but a
+  # reliable warning. Where the two estimators diverge, the keypoint error
+  # climbs from a 3 degree median to over 90 (see
+  # policy.max_estimator_disagreement_deg).
+  #
+  # Costs one extra segment_fruit and PCA per fruit, a few milliseconds against
+  # a 60-240ms scan. fuse() still lets the keypoints keep the axis; the
+  # silhouette only settles the flip, and now raises a flag.
+  shape_crosscheck: true
 
   # When the stem cannot be found AT ALL on a fully-visible fruit, ask the
   # silhouette instead of rejecting outright.
@@ -224,6 +237,30 @@ paprika:
     # and fix: a rising reject count is about the fruit, a rising review count
     # is about the detector.
     min_usable_confidence: 0.15
+
+    # Refuse to PLACE when the keypoints and the silhouette point in different
+    # directions by more than this.
+    #
+    # Measured over 802 hand-labelled fruit - the keypoint error against the
+    # clicked truth, bucketed by how far the two estimators disagreed:
+    #
+    #   disagreement    n    median err   over 20 deg
+    #     0-10 deg    439        3.0          10%
+    #    10-20 deg    102        4.9          15%
+    #    20-35 deg     56        8.0          30%
+    #    35-60 deg     22       53.5          77%
+    #   60-120 deg     17       91.2          82%
+    #  120-181 deg      5      135.7         100%
+    #
+    # At 30 this flags 9% of fruit, and 74% of what it flags really is more
+    # than 20 degrees out. At 20 it flags 16% and catches more of the tail, but
+    # only 53% of what it flags is genuinely bad - so half the throughput is
+    # spent on fruit that were fine. Lower it if a wrong angle costs more than
+    # a second pass on your line; raise it if the reverse.
+    #
+    # Reorient, not reject: the fruit is fine, the two readings simply cannot
+    # both be right, and another pass may settle it.
+    max_estimator_disagreement_deg: 30.0
 
     # Whether "unknown" also hides its angle.
     #

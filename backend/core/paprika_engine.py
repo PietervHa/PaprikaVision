@@ -180,6 +180,29 @@ class PaprikaEngine:
         # Floor below which no angle is reported at all, not even as a guess
         # the operator could overrule.
         self._min_usable_confidence = float(policy.get("min_usable_confidence", 0.15))
+        # Refuse to place when the two estimators point in different
+        # directions. Measured against 802 hand-labelled fruit, the keypoint
+        # error rises monotonically with how far the silhouette disagrees:
+        #
+        #   disagreement    n    median err   over 20 deg
+        #     0-10 deg    439        3.0          10%
+        #    10-20 deg    102        4.9          15%
+        #    20-35 deg     56        8.0          30%
+        #    35-60 deg     22       53.5          77%
+        #   60-120 deg     17       91.2          82%
+        #  120-181 deg      5      135.7         100%
+        #
+        # Neither estimator is reliably better - on green the keypoints win on
+        # median and the silhouette on p90 - so there is nothing to gain by
+        # reweighting them. What they give, cheaply, is a second opinion: where
+        # they diverge, one of them is wrong and nothing here can say which.
+        #
+        # fuse() already measures this and cuts the confidence by 0.6, but a
+        # fruit at 0.9 lands on 0.54 and still clears min_angle_confidence, so
+        # it still gets placed. This is the hard stop.
+        self._max_estimator_disagreement_deg = float(
+            policy.get("max_estimator_disagreement_deg", 30.0)
+        )
         # Withhold the angle from "unknown" as well, not only from "review".
         # "unknown" already means the ANGLE is not trusted - as distinct from
         # "reorient", which means the angle is trusted and the stem END is not.
@@ -299,6 +322,17 @@ class PaprikaEngine:
             # machine has to topple it and look again; there is nothing to
             # place from this view.
             return PLACEMENT_REJECT if self._reject_standing else PLACEMENT_REORIENT
+
+        # Checked before the confidence gates: a fruit the two estimators
+        # disagree about is not a low-confidence measurement, it is two
+        # measurements that cannot both be right. Reorient rather than reject -
+        # the fruit is fine and another pass may settle it.
+        if (
+            result.agreement_deg is not None
+            and result.agreement_deg > self._max_estimator_disagreement_deg
+            and result.angle_deg is not None
+        ):
+            return PLACEMENT_REORIENT
 
         if result.angle_deg is None:
             return PLACEMENT_UNKNOWN
