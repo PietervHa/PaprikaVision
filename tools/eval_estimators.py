@@ -47,6 +47,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backend.detection.paprika import classical  # noqa: E402
+from backend.detection.paprika import end_on  # noqa: E402
 from backend.detection.paprika import orientation as orient  # noqa: E402
 from backend.utils.paths import project_path  # noqa: E402
 
@@ -79,7 +80,18 @@ def shape_settings(cfg):
 
 
 def error_deg(predicted, truth) -> float:
+    """Direction error, 0-180. Which end the stem is on counts."""
     return abs(((predicted - truth + 180) % 360) - 180)
+
+
+def axis_error_deg(predicted, truth) -> float:
+    """AXIS error, 0-90. Being 180 degrees out scores zero here.
+
+    The grooves cannot tell which end carries the stem - they give an
+    orientation, not a direction - so scoring them as a direction would report
+    a coin flip and say nothing about the quantity they actually measure.
+    """
+    return abs(((predicted - truth + 90) % 180) - 90)
 
 
 def report(name: str, errors: list) -> None:
@@ -150,7 +162,9 @@ def main() -> int:
                 continue
 
             row = {"colour": colour, "stem_method": match.stem_method,
-                   "keypoints": None, "shape": None, "fused": None}
+                   "keypoints": None, "shape": None, "fused": None,
+                   "kp_axis": None, "groove_axis": None, "groove_plus_kp": None,
+                   "coherence": None}
 
             # --- keypoints alone -------------------------------------------
             kp_result = None
@@ -177,6 +191,30 @@ def main() -> int:
             if shape_result is not None and shape_result.angle_deg is not None:
                 row["shape"] = error_deg(shape_result.angle_deg, truth)
 
+            # --- grooves: axis only, and axis + the keypoints' flip ---------
+            # The two estimators fail in different places. On green the
+            # keypoints' AXIS is often badly wrong while their FLIP is mostly
+            # right (18 flips in 415). The grooves are the mirror image: they
+            # measure the axis directly off the fruit's own surface bands, and
+            # cannot speak to the flip at all. If that holds, taking the axis
+            # from one and the flip from the other beats either alone.
+            if mask is not None:
+                gx1, gy1, gx2, gy2 = match.bbox
+                measured = end_on.groove_axis(frame[gy1:gy2, gx1:gx2], mask)
+                if measured is not None:
+                    groove, coherence = measured
+                    row["coherence"] = coherence
+                    row["groove_axis"] = axis_error_deg(groove, truth)
+                    if kp_result is not None and kp_result.angle_deg is not None:
+                        # Keep the groove axis; choose the end the keypoints
+                        # lean towards.
+                        options = (groove % 360.0, (groove + 180.0) % 360.0)
+                        best = min(options,
+                                   key=lambda a: error_deg(a, kp_result.angle_deg))
+                        row["groove_plus_kp"] = error_deg(best, truth)
+            if kp_result is not None and kp_result.angle_deg is not None:
+                row["kp_axis"] = axis_error_deg(kp_result.angle_deg, truth)
+
             # --- what fuse() would return ----------------------------------
             if kp_result is not None:
                 fused = orient.fuse(kp_result, shape_result)
@@ -200,15 +238,21 @@ def main() -> int:
         return 1
 
     print(f"\n{len(rows)} labelled fruit, each estimator scored independently\n")
-    print("ALL")
-    for key in ("keypoints", "shape", "fused"):
+    print("DIRECTION error (which end the stem is on counts)")
+    for key in ("keypoints", "shape", "fused", "groove_plus_kp"):
+        report(key, [r[key] for r in rows if r[key] is not None])
+    print("\nAXIS error only (0-90; being 180 out scores zero)")
+    for key in ("kp_axis", "groove_axis"):
         report(key, [r[key] for r in rows if r[key] is not None])
 
     for colour in sorted({r["colour"] for r in rows if r["colour"]}):
         subset = [r for r in rows if r["colour"] == colour]
         print(f"\n{colour.upper()}  ({len(subset)} fruit)")
-        for key in ("keypoints", "shape", "fused"):
+        for key in ("keypoints", "shape", "fused", "groove_plus_kp"):
             report(key, [r[key] for r in subset if r[key] is not None])
+        print("   axis only:")
+        for key in ("kp_axis", "groove_axis"):
+            report("   " + key, [r[key] for r in subset if r[key] is not None])
 
     print("\nby how the stem was found:")
     for method in sorted({r["stem_method"] for r in rows}):
@@ -216,6 +260,28 @@ def main() -> int:
         print(f"\n  stem_method = {method}  ({len(subset)} fruit)")
         for key in ("keypoints", "shape", "fused"):
             report("    " + key, [r[key] for r in subset if r[key] is not None])
+
+    print("\n" + "=" * 70)
+    print("GROOVE AXIS BY COHERENCE")
+    print("  Coherence is how aligned the surface bands were. A smooth fruit")
+    print("  has no grooves to read and the axis means nothing there.")
+    banded = [r for r in rows if r["coherence"] is not None
+              and r["groove_axis"] is not None]
+    if banded:
+        print(f"\n  {'coherence':>14}{'n':>6}{'groove axis':>14}{'kp axis':>11}")
+        for low, high in ((0.0, 0.25), (0.25, 0.35), (0.35, 0.50),
+                          (0.50, 0.65), (0.65, 1.01)):
+            band = [r for r in banded if low <= r["coherence"] < high]
+            if not band:
+                continue
+            groove = np.median([r["groove_axis"] for r in band])
+            kp = [r["kp_axis"] for r in band if r["kp_axis"] is not None]
+            kp_median = np.median(kp) if kp else float("nan")
+            print(f"  {f'{low:.2f}-{high:.2f}':>14}{len(band):>6}"
+                  f"{groove:>14.1f}{kp_median:>11.1f}")
+        print("\n  Where the groove axis beats the keypoint axis, the grooves")
+        print("  are the better source for the DIRECTION OF THE FRUIT, and the")
+        print("  keypoints need only decide which end.")
 
     print("\n" + "=" * 70)
     print("DOES DISAGREEMENT PREDICT ERROR?")

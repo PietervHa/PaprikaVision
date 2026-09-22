@@ -72,7 +72,7 @@ paprika:
   # Costs one extra segment_fruit and PCA per fruit, a few milliseconds against
   # a 60-240ms scan. fuse() still lets the keypoints keep the axis; the
   # silhouette only settles the flip, and now raises a flag.
-  shape_crosscheck: true
+  shape_crosscheck: false
 
   # When the stem cannot be found AT ALL on a fully-visible fruit, ask the
   # silhouette instead of rejecting outright.
