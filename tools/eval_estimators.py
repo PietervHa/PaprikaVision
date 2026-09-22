@@ -183,6 +183,16 @@ def main() -> int:
                 if fused.angle_deg is not None:
                     row["fused"] = error_deg(fused.angle_deg, truth)
 
+            # How far apart the two estimators are, independent of either
+            # being right. If this predicts error it is usable as a GATE - a
+            # fruit the two disagree about can be sent for another look -
+            # which is worth more than a marginally better average, because it
+            # converts a bad placement into a flagged one.
+            if kp_result is not None and kp_result.angle_deg is not None \
+                    and shape_result is not None and shape_result.angle_deg is not None:
+                row["disagreement"] = error_deg(
+                    kp_result.angle_deg, shape_result.angle_deg
+                )
             rows.append(row)
 
     if not rows:
@@ -208,6 +218,37 @@ def main() -> int:
             report("    " + key, [r[key] for r in subset if r[key] is not None])
 
     print("\n" + "=" * 70)
+    print("DOES DISAGREEMENT PREDICT ERROR?")
+    print("  If the keypoint error is much worse when the two estimators")
+    print("  disagree, disagreement is a usable gate: reorient instead of place.")
+    both = [r for r in rows if r.get("disagreement") is not None
+            and r["keypoints"] is not None]
+    if both:
+        print(f"\n  {'disagreement':>16}{'n':>6}{'kp median':>11}{'kp p90':>9}"
+              f"{'kp >20deg':>11}{'flipped':>9}")
+        for low, high in ((0, 10), (10, 20), (20, 35), (35, 60), (60, 120), (120, 181)):
+            band = [r for r in both if low <= r["disagreement"] < high]
+            if not band:
+                continue
+            errors = np.array([r["keypoints"] for r in band])
+            print(f"  {f'{low}-{high} deg':>16}{len(band):>6}{np.median(errors):>11.1f}"
+                  f"{np.percentile(errors, 90):>9.1f}"
+                  f"{100 * (errors > 20).mean():>10.0f}%"
+                  f"{int((errors > 120).sum()):>9}")
+        for cut in (20, 30, 45):
+            agree = [r for r in both if r["disagreement"] < cut]
+            differ = [r for r in both if r["disagreement"] >= cut]
+            if not differ:
+                continue
+            a = np.array([r["keypoints"] for r in agree])
+            d = np.array([r["keypoints"] for r in differ])
+            print(f"\n  gate at {cut} deg: would flag {len(differ)} of {len(both)} fruit "
+                  f"({100 * len(differ) / len(both):.0f}%)")
+            print(f"     kept   : median {np.median(a):5.1f}  >20deg {100*(a>20).mean():3.0f}%"
+                  f"  flipped {int((a>120).sum())}")
+            print(f"     flagged: median {np.median(d):5.1f}  >20deg {100*(d>20).mean():3.0f}%"
+                  f"  flipped {int((d>120).sum())}")
+    print()
     print("If shape's median beats keypoints' on a colour, fuse() is holding it")
     print("back there: it currently lets the silhouette settle only the flip,")
     print("never the axis. If shape is worse, the present policy is right.")
