@@ -617,10 +617,20 @@ class PaprikaEngine:
         # blossom-up.
         reason = str(detection.get("unpickable_reason") or "")
         endon_note: list[str] = []
+        # stem_area_ratio measures a morphology blob against the fruit it sits
+        # on, so it only means anything where a blob was found. The pose
+        # backend has no such blob and emits no such field, and reading the
+        # default of 0.0 made "marginal" always true: every pose detection ran
+        # the end-on classifier, roughly 5ms a fruit, and any that scored above
+        # the threshold had its landmarks thrown away and was reported
+        # stemless. A missing measurement is not a small measurement.
+        stem_route = str(detection.get("stem_method", "none"))
+        ratio_is_meaningful = stem_route in ("hue", "morphology")
         if (
             self._detect_end_on
             and not reason
             and detection.get("keypoints")
+            and ratio_is_meaningful
             and float(detection.get("stem_area_ratio", 0.0) or 0.0)
                 < self._min_stem_area_ratio
         ):

@@ -90,6 +90,9 @@ def main() -> int:
                         help="how many distinct frames to cycle through")
     parser.add_argument("--onnx", action="store_true",
                         help="also export to ONNX and time it")
+    parser.add_argument("--device", default=None,
+                        help="pin the device, e.g. 0 or cpu. Unset lets "
+                             "ultralytics choose - which is worth checking.")
     args = parser.parse_args()
 
     try:
@@ -118,6 +121,45 @@ def main() -> int:
           f"{args.runs} timed calls each\n")
 
     model = YOLO(str(model_path))
+    if args.device is not None:
+        model.to(args.device)
+    # Where the weights actually live. Ultralytics chooses a device per call
+    # and does not announce it, so a model quietly running on the CPU looks
+    # exactly like a slow GPU - and an i7 takes roughly the same time for this
+    # model as the numbers we are trying to explain.
+    try:
+        where = next(model.model.parameters()).device
+        print(f"weights are on: {where}")
+    except Exception:
+        print("weights are on: could not determine")
+
+    # Split the model from the machinery around it. predict() letterboxes on
+    # the CPU, copies to the device, runs NMS and builds a Results object with
+    # plotting metadata; a bare forward pass does none of that. The difference
+    # between these two lines is what an export could plausibly remove, and it
+    # is the whole question when the times stop scaling with the image size.
+    if True:
+        import torch as _torch
+        size = 640
+        tensor = _torch.zeros(1, 3, size, size)
+        try:
+            tensor = tensor.to(next(model.model.parameters()).device)
+            with _torch.no_grad():
+                for _ in range(5):
+                    model.model(tensor)
+                if cuda:
+                    _torch.cuda.synchronize()
+                start = time.perf_counter()
+                for _ in range(20):
+                    model.model(tensor)
+                if cuda:
+                    _torch.cuda.synchronize()
+            raw = (time.perf_counter() - start) / 20 * 1000
+            print(f"\nbare forward pass at 640 (no pre/post, no Results): "
+                  f"{raw:.1f} ms")
+            print("   everything above this in the table is framework overhead\n")
+        except Exception as exc:
+            print(f"\nbare forward pass failed: {exc}\n")
 
     print(f"{'setting':<34}{'median':>10}{'p90':>10}")
     print("-" * 54)
