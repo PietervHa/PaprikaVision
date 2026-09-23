@@ -88,10 +88,15 @@ def main() -> int:
     parser.add_argument("--runs", type=int, default=30)
     parser.add_argument("--limit", type=int, default=8,
                         help="how many distinct frames to cycle through")
+    parser.add_argument("--architectures", action="store_true",
+                        help="time other pretrained pose architectures at 640. "
+                             "An OLDER network can be faster on an older GPU "
+                             "even with more FLOPs, because its operations map "
+                             "better onto the hardware.")
     parser.add_argument("--onnx", action="store_true",
                         help="also export to ONNX and time it")
     parser.add_argument("--device", default=None,
-                        help="pin the device, e.g. 0 or cpu. Unset lets "
+                        help="pin the device: 0, cuda:0 or cpu. Unset lets "
                              "ultralytics choose - which is worth checking.")
     args = parser.parse_args()
 
@@ -122,7 +127,13 @@ def main() -> int:
 
     model = YOLO(str(model_path))
     if args.device is not None:
-        model.to(args.device)
+        # "0" is what ultralytics and nvidia-smi call the first GPU, and what
+        # anyone types. torch wants "cuda:0" and raises on the bare digit, so
+        # accept both rather than making the caller remember which tool this is.
+        device = args.device.strip()
+        if device.isdigit():
+            device = f"cuda:{device}"
+        model.to(device)
     # Where the weights actually live. Ultralytics chooses a device per call
     # and does not announce it, so a model quietly running on the CPU looks
     # exactly like a slow GPU - and an i7 takes roughly the same time for this
@@ -176,6 +187,27 @@ def main() -> int:
         median, p90 = time_model(model, frames, args.runs, imgsz=640, half=True)
         print(f"  {'imgsz=640 half=True':<32}{median:>10.1f}{p90:>10.1f}")
         print("     (no fast FP16 below compute 7.0 - expect no gain on Maxwell)")
+
+    if args.architectures:
+        # Downloads each on first use. FLOPs are not the measure here: YOLOv8's
+        # plain convolutions are well-trodden ground for cuDNN, while YOLO11's
+        # C3k2 and C2PSA blocks were tuned on hardware a decade newer than a
+        # Maxwell card. More arithmetic in simpler kernels can finish sooner.
+        print("\narchitectures at imgsz=640 (pretrained, untrained on your fruit -")
+        print("this measures SPEED only, not accuracy):")
+        for name, flops in (("yolo11n-pose.pt", "6.6"), ("yolov8n-pose.pt", "9.2"),
+                            ("yolo11s-pose.pt", "23.2")):
+            try:
+                other = YOLO(name)
+                if args.device is not None:
+                    device = args.device.strip()
+                    other.to(f"cuda:{device}" if device.isdigit() else device)
+                median, p90 = time_model(other, frames, args.runs, imgsz=640)
+                print(f"  {name:<22} {flops:>5} GFLOPs {median:>9.1f} ms{p90:>10.1f}")
+            except Exception as exc:
+                print(f"  {name:<22} failed: {exc}")
+        print("  If one is clearly faster, retraining on it is a day's work and")
+        print("  the dataset is already built.")
 
     if args.onnx:
         print("\nexporting to ONNX (one-off, takes a moment)...")
