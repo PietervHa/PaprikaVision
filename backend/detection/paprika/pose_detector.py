@@ -113,11 +113,37 @@ class PaprikaDetector:
 
             self._model = YOLO(self._model_path)
             log.info("Paprika pose model loaded: %s", self._model_path)
+            self._warm_up(self._model)
             return self._model
         except Exception as exc:
             log.error("Failed to load paprika pose model '%s': %s", self._model_path, exc)
             self._model_failed = True
             return None
+
+    def _warm_up(self, model) -> None:
+        """Run one throwaway inference so the first real frame is not the slow one.
+
+        A cold CUDA model compiles kernels, allocates workspace and initialises
+        cuDNN on its first call - seconds, not milliseconds. Without this that
+        cost lands on whichever fruit happens to arrive first after a restart,
+        which on a trigger-driven line means a missed piece rather than a slow
+        one. Doing it at load moves the cost to somewhere nobody is waiting.
+
+        Deliberately forgiving: a warm-up that fails has not broken anything
+        the next real call will not also hit and report properly, and refusing
+        to start over a throwaway inference would be worse than a slow frame.
+        """
+        try:
+            blank = np.zeros((self._imgsz, self._imgsz, 3), dtype=np.uint8)
+            start = time.perf_counter()
+            model.predict(blank, imgsz=self._imgsz, conf=self.confidence,
+                          verbose=False)
+            log.info(
+                "Paprika pose model warmed up in %.0f ms",
+                (time.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:
+            log.warning("Paprika pose warm-up skipped: %s", exc)
 
     def status(self) -> dict:
         return {
