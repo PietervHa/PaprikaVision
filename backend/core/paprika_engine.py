@@ -275,8 +275,8 @@ class PaprikaEngine:
         # segmentation mask both of the others depend on. See the "third
         # signal" section of the orientation.py module docstring for why this
         # is a cross-check rather than a third vote: it can only ever flag a
-        # disagreement or nudge confidence, never decide the angle or the
-        # flip - a groove has no front or back.
+        # disagreement or cut confidence, never decide the angle or the flip
+        # - a groove has no front or back.
         #
         # Colour-gated the same way uncertain_shape_crosscheck is, and for the
         # same reason: colour finds the stem directly on red/orange/yellow
@@ -285,13 +285,22 @@ class PaprikaEngine:
         # this helps outside green. Widen the list once the per-colour
         # breakdown in tools/eval_estimators.py says it is worth the extra
         # segment_fruit + groove_axis call on fruit that were already fine.
-        self._groove_crosscheck = bool(policy.get("groove_crosscheck", True))
+        #
+        # Shipped OFF. The mechanism is exercised end to end by
+        # tests/test_groove_crosscheck.py, but unlike
+        # max_estimator_disagreement_deg it has not yet been checked against
+        # labelled data - run tools/eval_estimators.py and read its "DOES
+        # GROOVE DISAGREEMENT PREDICT ERROR?" table against your own captures
+        # before switching this on at volume.
+        self._groove_crosscheck = bool(policy.get("groove_crosscheck", False))
         self._groove_crosscheck_colours = {
             str(colour).strip().lower()
             for colour in (policy.get("groove_crosscheck_colours") or ["green"])
         }
         # How far the settled axis may disagree with a high-coherence groove
-        # reading before the fruit is reoriented rather than placed.
+        # reading before the fruit is reoriented rather than placed - a hard
+        # stop in _placement_for, not merely a confidence cut: 0.9 * 0.6 =
+        # 0.54 still clears min_angle_confidence (0.45) on its own.
         #
         # Started equal to max_estimator_disagreement_deg as a principled
         # opening value, not a measured one: unlike that threshold, this one
@@ -620,7 +629,7 @@ class PaprikaEngine:
         )
 
     def _apply_groove_crosscheck(
-        self, frame: np.ndarray, bbox, colour: str, result: Orientation
+        self, frame: np.ndarray, bbox, result: Orientation, colour: str
     ) -> Orientation:
         """Compare whatever axis the pipeline settled on against the grooves.
 
@@ -632,7 +641,7 @@ class PaprikaEngine:
         fallback already answered from grooves directly) is left alone here.
 
         See orient.groove_crosscheck for what this can and cannot change: an
-        angle it disagrees with gets flagged and its confidence nudged, never
+        angle it disagrees with gets flagged and its confidence cut, never
         overwritten - the flip is never touched, because grooves cannot speak
         to it.
         """
@@ -653,7 +662,7 @@ class PaprikaEngine:
             axis,
             coherence,
             min_coherence=self._min_groove_coherence,
-            disagreement_threshold_deg=self._max_groove_disagreement_deg,
+            max_disagreement_deg=self._max_groove_disagreement_deg,
         )
 
     def _end_on_verdict(
@@ -898,16 +907,22 @@ class PaprikaEngine:
                 result = from_grooves
                 placement = self._placement_for(result)
 
-        # Run once, on whatever candidate the branches above settled on -
-        # after the review fallback above, which can replace `result`
-        # wholesale with a groove reading of its own (self-comparison is
-        # skipped inside _apply_groove_crosscheck for exactly that case), and
-        # before the PLACING guards below, so a fruit the grooves disagree
-        # with is reoriented rather than reaching them at all.
-        result = self._apply_groove_crosscheck(
-            frame, bbox, detection.get("colour", ""), result
-        )
-        placement = self._placement_for(result)
+        # A second opinion for a fruit that is, as of the line above, about
+        # to be placed - deliberately gated on that rather than run
+        # unconditionally, so a REORIENT/REJECT/REVIEW fruit is not paying for
+        # a check whose answer cannot change its outcome. Runs after every
+        # branch above that can still replace `result` wholesale (the
+        # uncertain_shape_crosscheck block and the review fallback just
+        # above), so this cannot be silently bypassed by one of them running
+        # afterwards and producing a fresh Orientation with no
+        # groove_agreement_deg set. Self-comparison is skipped inside
+        # _apply_groove_crosscheck for a fruit the review fallback already
+        # answered from grooves directly.
+        if placement == PLACEMENT_PLACE:
+            result = self._apply_groove_crosscheck(
+                frame, bbox, result, detection.get("colour", "")
+            )
+            placement = self._placement_for(result)
 
         # Two guards on PLACING, both from the first ground-truth measurement
         # this project has had: 470 hand-clicked stem positions scored against

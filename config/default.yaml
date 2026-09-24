@@ -32,7 +32,7 @@ paprika:
   #                because the true angle is known exactly, any mismatch at the
   #                PLC end is a convention bug, not a detection bug.
   # ---------------------------------------------------------------------------
-  backend: "pose"
+  backend: "shape"
 
   confidence: 0.45          # detector confidence floor (pose backend)
   max_detections: 8
@@ -428,15 +428,26 @@ paprika:
     # orientation.py module docstring for the reasoning: keypoints and shape
     # both start from the same evidence, so on a fruit where that evidence
     # is misleading they can be confidently wrong together, and a groove
-    # reading from texture alone does not share that blind spot.
+    # reading from texture alone does not share that blind spot. NOT the
+    # same thing as groove_axis_fallback above: that supplies an axis when
+    # there is none; this only ever casts doubt on an axis that already
+    # exists, and can downgrade a placement but never produce or change one.
     #
-    # This can only ever flag a disagreement or nudge confidence - never set
+    # This can only ever flag a disagreement or cut confidence - never set
     # the angle or decide the flip, because a groove has no front or back
     # (see end_on.groove_axis). Costs one more segment_fruit + groove_axis
-    # call, already paid on every fruit the groove_axis_fallback path or the
-    # review fallback below touches; this is the same call made on fruit
-    # that otherwise had a perfectly good stem.
-    groove_crosscheck: true
+    # call, only on a fruit that was already about to be placed (see the
+    # PLACEMENT_PLACE guard around the call site in _evaluate_one) - a fruit
+    # already headed for reorient/reject/review pays nothing extra, since
+    # this check cannot change that outcome.
+    #
+    # Shipped OFF. The mechanism is exercised end to end by
+    # tests/test_groove_crosscheck.py, but unlike
+    # max_estimator_disagreement_deg it has not yet been checked against
+    # labelled data - run tools/eval_estimators.py and read its "DOES GROOVE
+    # DISAGREEMENT PREDICT ERROR?" table against your own captures before
+    # switching this on at volume.
+    groove_crosscheck: false
     # Colour finds the stem directly on red/orange/yellow (87% hit rate), so
     # there is nothing uncertain there worth the extra call - same reasoning
     # as uncertain_shape_colours above. Widen this once
@@ -444,7 +455,10 @@ paprika:
     # earns its keep on another colour too.
     groove_crosscheck_colours: [green]
     # How far the settled axis may disagree with a high-coherence groove
-    # reading before the fruit is reoriented instead of placed.
+    # reading before the fruit is reoriented instead of placed - a hard stop
+    # in _placement_for, not merely a confidence cut: groove_crosscheck()
+    # cuts confidence by 0.6 on a disagreement, and 0.9 x 0.6 = 0.54 still
+    # clears min_angle_confidence on its own.
     #
     # Opened at the same value as max_estimator_disagreement_deg above as a
     # principled starting point, not a measured one: that threshold was set

@@ -204,16 +204,18 @@ def angular_difference(a: float, b: float) -> float:
 def axis_difference(a: float, b: float) -> float:
     """Smallest difference between two AXES (0-180 orientations), 0-90.
 
-    An axis has no front or back - a groove reading of 175 and a keypoint
-    direction of 10 describe the same line through the fruit, not a near
-    180-degree disagreement. Folding both onto 0-180 first and then onto
-    0-90 is what `tools/eval_estimators.py`'s `axis_error_deg` already does
-    for scoring against ground truth; this is the same formula, in one
-    place, so the runtime cross-check and the offline scorer cannot drift
-    apart the way keypoint and shape angle math briefly did before
-    `vector_to_angle` was pulled out for the same reason.
+    `angular_difference` treats its inputs as directions - 0 and 180 are
+    opposite ends of the fruit, maximally different. An axis has no ends: a
+    groove reading of 175 and a keypoint direction of 10 describe the same
+    line through the fruit, not a near-180-degree disagreement. Reuses
+    `angular_difference` rather than a second formula, so the runtime
+    cross-check and the offline scorer in `tools/eval_estimators.py` (which
+    delegates its own `axis_error_deg` here) cannot drift onto two different
+    definitions of "how far apart are two axes" - the same reason
+    `vector_to_angle` was pulled out on its own below.
     """
-    return abs((_norm180(a) - _norm180(b) + 90.0) % 180.0 - 90.0)
+    diff = angular_difference(a, b)
+    return diff if diff <= 90.0 else 180.0 - diff
 
 
 def vector_to_angle(dx: float, dy: float) -> float:
@@ -774,7 +776,7 @@ def groove_crosscheck(
     groove_axis_deg: Optional[float],
     coherence: Optional[float],
     min_coherence: float = 0.35,
-    disagreement_threshold_deg: float = 30.0,
+    max_disagreement_deg: float = 30.0,
 ) -> Orientation:
     """Check a settled axis against the fruit's own surface grooves.
 
@@ -791,31 +793,41 @@ def groove_crosscheck(
     - records the disagreement in `groove_agreement_deg`, so
       `PaprikaEngine._placement_for()` can reorient on it exactly as it
       already does for `agreement_deg` (keypoints vs. shape), and
-    - nudges `confidence` up on agreement or down on disagreement, the same
-      modest way `fuse()` does for its own two estimators - not a
-      substitute for the hard stop, since a confidence multiplier alone was
-      already shown not to reliably trigger it (see
+    - cuts `confidence` on disagreement, the same way `fuse()` does for its
+      own two estimators - not a substitute for the hard stop, since a
+      confidence multiplier alone was already shown not to reliably trigger
+      it (see
       `tests/test_disagreement_gate.py::test_confidence_alone_would_not_have_caught_it`).
 
-    A no-op whenever there is nothing to compare: no settled angle, no
-    groove reading, or a groove reading too faint to trust
-    (`coherence < min_coherence` - the same floor the runtime's own groove
-    fallback uses, for the same reason: below it the "axis" is just the
-    direction of whatever noise happened to be strongest).
+    Agreement is recorded (`groove_agreement_deg`, a "groove_agrees" note)
+    but does NOT raise confidence the way disagreement lowers it: a groove
+    reading carries its own few-degree noise even at good coherence (see the
+    "GROOVE AXIS BY COHERENCE" table `tools/eval_estimators.py` prints), so
+    landing close to the settled axis is milder evidence than landing far
+    from it is - rewarding it the same amount either direction would let a
+    merely-average groove reading manufacture confidence the estimators
+    themselves never earned.
+
+    A no-op whenever there is nothing to compare: no settled angle or no
+    groove reading at all. A reading that WAS taken but is too faint to
+    trust (`coherence < min_coherence` - the same floor the runtime's own
+    groove fallback uses) is also skipped, but says so in `notes`, since
+    that is a different situation from no reading existing in the first
+    place.
     """
     if result.angle_deg is None or groove_axis_deg is None or coherence is None:
         return result
     if coherence < min_coherence:
+        result.notes.append(f"groove_crosscheck_skipped coherence={coherence:.2f}")
         return result
 
     disagreement = axis_difference(result.angle_deg, groove_axis_deg)
     result.groove_agreement_deg = disagreement
 
-    if disagreement > disagreement_threshold_deg:
+    if disagreement > max_disagreement_deg:
         result.confidence *= 0.6
-        result.notes.append(f"groove_axis_disagreement={disagreement:.0f}deg")
+        result.notes.append(f"groove_disagreement={disagreement:.0f}deg")
     else:
-        result.confidence = float(min(1.0, result.confidence * 1.05))
         result.notes.append("groove_agrees")
 
     return result

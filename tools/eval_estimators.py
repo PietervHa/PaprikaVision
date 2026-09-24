@@ -376,7 +376,10 @@ def main() -> int:
     if groove_kp:
         print(f"\n  {'disagreement':>16}{'n':>6}{'kp median':>11}{'kp p90':>9}"
               f"{'kp >20deg':>11}{'flipped':>9}")
-        for low, high in ((0, 10), (10, 20), (20, 35), (35, 60), (60, 120), (120, 181)):
+        # Bucketed to 90, not 181 like the keypoint/shape table above:
+        # groove_kp_disagreement is an axis_difference, folded onto 0-90 by
+        # construction, so nothing could ever land past it.
+        for low, high in ((0, 10), (10, 20), (20, 35), (35, 60), (60, 90.01)):
             band = [r for r in groove_kp if low <= r["groove_kp_disagreement"] < high]
             if not band:
                 continue
