@@ -140,8 +140,17 @@ class PaprikaEngine:
         # classifier scores 0.84-0.98, higher than the fruit it is meant to
         # catch, so it must never be allowed to overrule a confident reading.
         # These two gates are what keep it on the population it works on.
+        # Standing is a geometric claim: seen down its own axis, a fruit's two
+        # ends project close together. keypoint_orientation calls it standing
+        # below min_span_ratio (0.18), so reconsidering up to 0.22 covers the
+        # fruit the model ALMOST placed together and nothing else.
+        #
+        # This was 0.45, which is most of the crop. A red pepper lying on the
+        # belt with both landmarks correctly placed measured 0.43 and was
+        # reported "standing, stem up" - the end-on classifier scores ordinary
+        # stemmed fruit 0.84-0.98, so once the gate opens it says yes.
         self._end_on_span_ratio_max = float(
-            block.get("end_on_span_ratio_max", 0.45)
+            block.get("end_on_span_ratio_max", 0.22)
         )
         # Kept so an existing config does not fail to load; no longer consulted.
         # See _reconsider_standing for why confidence was the wrong signal.

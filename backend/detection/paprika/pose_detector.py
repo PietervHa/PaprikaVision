@@ -38,7 +38,7 @@ from backend.detection.paprika import classical
 from backend.detection.paprika import orientation as orient
 from backend.detection.paprika.orientation import Keypoint
 from backend.utils.logger import get_logger
-from backend.detection.paprika.classical import EDGE_MARGIN_PX
+from backend.detection.paprika.classical import EDGE_MARGIN_PX, REASON_EDGE_CLIPPED
 from backend.utils.paths import project_path
 
 # Share of the bounding-box perimeter that may lie on the frame border before
@@ -357,6 +357,9 @@ class PaprikaDetector:
                             visible=kc >= self._kp_confidence,
                         )
 
+                clipped = self._bbox_edge_cut(
+                    (x1, y1, x2, y2), frame.shape
+                ) > BBOX_EDGE_CUT_THRESHOLD
                 detections.append(
                     {
                         "bbox": [x1, y1, x2, y2],
@@ -366,9 +369,17 @@ class PaprikaDetector:
                         # fruit running off the frame was measured as though it
                         # were whole - landmarks partly outside the image and
                         # all.
-                        "edge_clipped": self._bbox_edge_cut(
-                            (x1, y1, x2, y2), frame.shape
-                        ) > BBOX_EDGE_CUT_THRESHOLD,
+                        # unpickable_reason is the field the engine reads:
+                        # _UNPICKABLE_POSES is keyed by its VALUE. Setting only
+                        # "edge_clipped" left the flag inert - nothing in the
+                        # codebase consumes that key - so a fruit running off
+                        # the frame kept being measured as a whole one and
+                        # placed with a confident angle, from landmarks partly
+                        # outside the image.
+                        "unpickable_reason": (
+                            REASON_EDGE_CLIPPED if clipped else ""
+                        ),
+                        "edge_clipped": clipped,
                         "confidence": round(float(box_conf[i]), 3) if i < len(box_conf) else 0.0,
                         "keypoints": landmarks,
                         "area_px": max(0, (x2 - x1) * (y2 - y1)),
