@@ -54,6 +54,7 @@ function drawDial(angleDeg, placement) {
   const colors = {
     place: "#46be5a",
     reorient: "#ebb43c",
+    review: "#c765d4",
     reject: "#dc3c3c",
     unknown: "#93a1b3",
   };
@@ -149,7 +150,7 @@ function renderLive(live) {
   $("factCount").textContent = live ? live.count : 0;
   $("factScan").textContent = live && live.scan_ms ? `${Math.round(live.scan_ms)} ms` : "— ms";
 
-  card.classList.remove("is-place", "is-reorient", "is-reject");
+  card.classList.remove("is-place", "is-reorient", "is-reject", "is-review");
 
   if (!primary || live.stale) {
     $("angleNumber").textContent = "—";
@@ -179,7 +180,13 @@ function renderLive(live) {
     standing_stem_up: "standing, stem up",
     standing_stem_down: "standing, stem down",
   };
-  $("placementText").textContent = poseLabels[orientation.pose] || placement;
+  // A review overrides the pose wording. The pose may well say "lying", but
+  // saying so next to a withheld angle reads as a measurement the machine did
+  // not make.
+  $("placementText").textContent =
+    placement === "review"
+      ? "human check needed"
+      : poseLabels[orientation.pose] || placement;
   $("poseText").textContent = orientation.pose ? orientation.pose.replace(/_/g, " ") : "—";
   $("factSource").textContent = orientation.source || "—";
 
@@ -196,6 +203,7 @@ function renderCounters(counters) {
   if (!counters) return;
   $("cntOk").textContent = counters.ok ?? 0;
   $("cntReorient").textContent = counters.reorient ?? 0;
+  $("cntReview").textContent = counters.review ?? 0;
   $("cntUpside").textContent = counters.upside_down ?? 0;
   $("cntIncomplete").textContent = counters.incomplete ?? 0;
   $("cntTotal").textContent = counters.total ?? 0;

@@ -55,6 +55,13 @@ PLACEMENT_PLACE = "place"
 PLACEMENT_REORIENT = "reorient"
 PLACEMENT_REJECT = "reject"
 PLACEMENT_UNKNOWN = "unknown"
+# Below min_usable_confidence the measurement is not weak, it is absent - the
+# numbers that come out are whatever the noise happened to be. "unknown" already
+# means "measured, and not good enough to act on"; this means "there is nothing
+# here worth calling a measurement, send a person". Kept apart from unknown so
+# the counters separate a detector working badly from a detector not working at
+# all, which are different things to go and fix.
+PLACEMENT_REVIEW = "review"
 
 # Why the detector said a fruit is unusable, mapped onto the pose it is
 # recorded as. The keys are the REASON_* values in
@@ -112,6 +119,31 @@ class PaprikaEngine:
         belt = shape_cfg.get("belt_hue") or [96, 145]
         self._belt_hue = (int(belt[0]), int(belt[1]))
         self._min_span_ratio = float(block.get("min_span_ratio", 0.18))
+        # A standing fruit is only recognised by keypoints when the model puts
+        # the two landmarks nearly on top of each other. The pose model has
+        # almost never seen that: its training set was 5.5% standing fruit and
+        # 0% occluded landmarks, so it has essentially no example of the two
+        # ends coinciding and it spreads them apart instead. The fruit then
+        # comes out "lying" with a guessed angle, or - when the landmarks are
+        # uncertain - as "human check needed".
+        #
+        # The silhouette does not have that blind spot. end_on.py reads the
+        # fruit's own outline and surface, is backend-independent, and was
+        # measured at AUC 0.872 leave-one-session-out. Consulting it when the
+        # keypoint evidence for "lying" is weak recovers exactly the case the
+        # training data is missing, without waiting for more labels.
+        self._end_on_overrides_lying = bool(
+            block.get("end_on_overrides_lying", True)
+        )
+        # Only consulted when the keypoints are UNCONVINCING about lying.
+        # Measured previously: on fruit with strong stem evidence the end-on
+        # classifier scores 0.84-0.98, higher than the fruit it is meant to
+        # catch, so it must never be allowed to overrule a confident reading.
+        # These two gates are what keep it on the population it works on.
+        self._end_on_span_ratio_max = float(
+            block.get("end_on_span_ratio_max", 0.45)
+        )
+        self._end_on_conf_max = float(block.get("end_on_conf_max", 0.55))
 
         # When the classical backend cannot find a stem at all on a fully-
         # visible fruit, ask the silhouette instead of rejecting outright: a
@@ -145,6 +177,43 @@ class PaprikaEngine:
         # Placement policy thresholds.
         policy = block.get("policy") if isinstance(block.get("policy"), dict) else {}
         self._min_angle_confidence = float(policy.get("min_angle_confidence", 0.45))
+        # Floor below which no angle is reported at all, not even as a guess
+        # the operator could overrule.
+        self._min_usable_confidence = float(policy.get("min_usable_confidence", 0.15))
+        # Refuse to place when the two estimators point in different
+        # directions. Measured against 802 hand-labelled fruit, the keypoint
+        # error rises monotonically with how far the silhouette disagrees:
+        #
+        #   disagreement    n    median err   over 20 deg
+        #     0-10 deg    439        3.0          10%
+        #    10-20 deg    102        4.9          15%
+        #    20-35 deg     56        8.0          30%
+        #    35-60 deg     22       53.5          77%
+        #   60-120 deg     17       91.2          82%
+        #  120-181 deg      5      135.7         100%
+        #
+        # Neither estimator is reliably better - on green the keypoints win on
+        # median and the silhouette on p90 - so there is nothing to gain by
+        # reweighting them. What they give, cheaply, is a second opinion: where
+        # they diverge, one of them is wrong and nothing here can say which.
+        #
+        # fuse() already measures this and cuts the confidence by 0.6, but a
+        # fruit at 0.9 lands on 0.54 and still clears min_angle_confidence, so
+        # it still gets placed. This is the hard stop.
+        self._max_estimator_disagreement_deg = float(
+            policy.get("max_estimator_disagreement_deg", 30.0)
+        )
+        # Withhold the angle from "unknown" as well, not only from "review".
+        # "unknown" already means the ANGLE is not trusted - as distinct from
+        # "reorient", which means the angle is trusted and the stem END is not.
+        # Printing a number beside a verdict that says the number cannot be
+        # relied on invites somebody to rely on it, which is the whole reason
+        # these verdicts exist.
+        self._hide_unknown_angle = bool(policy.get("hide_unknown_angle", True))
+        # Refuse to PLACE on a stem that was never verified, or never seen.
+        self._require_verified_stem = bool(
+            policy.get("require_verified_stem", True)
+        )
         self._min_flip_confidence = float(policy.get("min_flip_confidence", 0.40))
         self._reject_standing = bool(policy.get("reject_standing", True))
         # A fruit whose stem could not be found is not the same as a fruit that
@@ -183,6 +252,66 @@ class PaprikaEngine:
         # Maximum measured movement of the stem direction under a lighting
         # change before the fruit is sent round again instead of placed.
         self._max_stem_spread_deg = float(policy.get("max_stem_spread_deg", 6.0))
+        # A stem WAS found (this is not the no_stem/groove path above) but the
+        # verdict it produced is not placeable. Rather than trust it anyway or
+        # give up and send the fruit to review, ask shape_orientation() to
+        # settle just the flip - the same fuse() arbitration shape_crosscheck
+        # already does, run here only when the un-helped verdict needed help.
+        # Scoped to green by default: colour finds the stem directly on
+        # red/orange (measured hit rate 87%), so there is nothing uncertain
+        # there worth a second opinion; on green, colour cannot see the stem
+        # at all and quality comes entirely from morphology plus a brightness
+        # self-check that is measurably more fragile - see stem_by_morphology
+        # and _stem_selfcheck in classical.py for why.
+        self._uncertain_shape_crosscheck = bool(policy.get("uncertain_shape_crosscheck", True))
+        self._uncertain_shape_colours = {
+            str(colour).strip().lower()
+            for colour in (policy.get("uncertain_shape_colours") or ["green"])
+        }
+
+        # Groove cross-check: compare whatever axis the pipeline settled on -
+        # keypoints, fused, or a shape-only fallback - against the fruit's own
+        # surface grooves, read independently of either the pose model or the
+        # segmentation mask both of the others depend on. See the "third
+        # signal" section of the orientation.py module docstring for why this
+        # is a cross-check rather than a third vote: it can only ever flag a
+        # disagreement or cut confidence, never decide the angle or the flip
+        # - a groove has no front or back.
+        #
+        # Colour-gated the same way uncertain_shape_crosscheck is, and for the
+        # same reason: colour finds the stem directly on red/orange/yellow
+        # (87% hit rate), so keypoints already have little room to be
+        # confidently wrong there, and there is nothing measured yet showing
+        # this helps outside green. Widen the list once the per-colour
+        # breakdown in tools/eval_estimators.py says it is worth the extra
+        # segment_fruit + groove_axis call on fruit that were already fine.
+        #
+        # Shipped OFF. The mechanism is exercised end to end by
+        # tests/test_groove_crosscheck.py, but unlike
+        # max_estimator_disagreement_deg it has not yet been checked against
+        # labelled data - run tools/eval_estimators.py and read its "DOES
+        # GROOVE DISAGREEMENT PREDICT ERROR?" table against your own captures
+        # before switching this on at volume.
+        self._groove_crosscheck = bool(policy.get("groove_crosscheck", False))
+        self._groove_crosscheck_colours = {
+            str(colour).strip().lower()
+            for colour in (policy.get("groove_crosscheck_colours") or ["green"])
+        }
+        # How far the settled axis may disagree with a high-coherence groove
+        # reading before the fruit is reoriented rather than placed - a hard
+        # stop in _placement_for, not merely a confidence cut: 0.9 * 0.6 =
+        # 0.54 still clears min_angle_confidence (0.45) on its own.
+        #
+        # Started equal to max_estimator_disagreement_deg as a principled
+        # opening value, not a measured one: unlike that threshold, this one
+        # has not yet been checked against labelled real crops bucketed by
+        # groove disagreement the way policy.md above documents for
+        # keypoints vs. shape. Re-run tools/eval_estimators.py once it
+        # reports a groove-disagreement breakdown and tighten or relax this
+        # to match what the data actually shows on your line.
+        self._max_groove_disagreement_deg = float(
+            policy.get("max_groove_disagreement_deg", 30.0)
+        )
 
         # Machine frame mapping. Changing how the vision zero lines up with the
         # actuator zero must never require a code change - it is a commissioning
@@ -205,6 +334,10 @@ class PaprikaEngine:
             {
                 "shape_crosscheck": self._use_shape_crosscheck,
                 "stemless_shape_fallback": self._stemless_shape_fallback,
+                "uncertain_shape_crosscheck": self._uncertain_shape_crosscheck,
+                "uncertain_shape_colours": sorted(self._uncertain_shape_colours),
+                "groove_crosscheck": self._groove_crosscheck,
+                "groove_crosscheck_colours": sorted(self._groove_crosscheck_colours),
                 "angle_offset_deg": self._angle_offset_deg,
                 "angle_invert": self._angle_invert,
                 "primary_rule": self._primary_rule,
@@ -236,8 +369,38 @@ class PaprikaEngine:
             # place from this view.
             return PLACEMENT_REJECT if self._reject_standing else PLACEMENT_REORIENT
 
+        # Checked before the confidence gates: a fruit the two estimators
+        # disagree about is not a low-confidence measurement, it is two
+        # measurements that cannot both be right. Reorient rather than reject -
+        # the fruit is fine and another pass may settle it.
+        if (
+            result.agreement_deg is not None
+            and result.agreement_deg > self._max_estimator_disagreement_deg
+            and result.angle_deg is not None
+        ):
+            return PLACEMENT_REORIENT
+
+        # Same policy, extended to the groove cross-check: an axis a fruit's
+        # own surface texture disagrees with is not a low-confidence
+        # measurement either, for the same reason agreement_deg above is
+        # checked before the confidence gates rather than folded into one.
+        if (
+            result.groove_agreement_deg is not None
+            and result.groove_agreement_deg > self._max_groove_disagreement_deg
+            and result.angle_deg is not None
+        ):
+            return PLACEMENT_REORIENT
+
         if result.angle_deg is None:
             return PLACEMENT_UNKNOWN
+
+        # Checked before the ordinary confidence gate, because it is a
+        # different statement. Between the two thresholds the machine has a
+        # real measurement it does not trust enough to act on; below the floor
+        # it has no measurement, and printing a number next to it invites
+        # somebody to read meaning into noise.
+        if result.confidence < self._min_usable_confidence:
+            return PLACEMENT_REVIEW
 
         if result.confidence < self._min_angle_confidence:
             return PLACEMENT_UNKNOWN
@@ -251,6 +414,11 @@ class PaprikaEngine:
 
     @staticmethod
     def _label_for(result: Orientation, placement: str) -> str:
+        if placement == PLACEMENT_REVIEW:
+            # Deliberately carries no number. The angle behind this verdict is
+            # kept in the notes for anyone reading the record back, but it is
+            # not put in front of an operator as though it were an answer.
+            return "human check needed"
         if result.pose == orient.POSE_STANDING_STEM_UP:
             return "standing, stem up"
         if result.pose == orient.POSE_STANDING_STEM_DOWN:
@@ -326,6 +494,63 @@ class PaprikaEngine:
 
         return None, []
 
+    def _reconsider_standing(self, frame, bbox, result, stem):
+        """Ask the silhouette whether a "lying" fruit is really standing.
+
+        Runs only when the keypoints are unconvincing: either the two landmarks
+        sit close together (already near the standing threshold) or the pair
+        confidence is low. A confident, well-separated pair is left alone,
+        because the end-on classifier is measurably unreliable on fruit whose
+        stem evidence is strong and would overrule good readings.
+
+        Which end is up comes from the stem landmark's own visibility, exactly
+        as keypoint_orientation decides it - a stem the model could see means
+        stem-up, one it placed but could not see means stem-down. That is the
+        occluded case ANNOTATION_SPEC section 3 describes, and it is the one
+        piece of this the model does report usefully even when it misplaces
+        the landmark.
+
+        The angle is withdrawn, not merely relabelled. A rotation angle for a
+        fruit standing on its end is not an unknown quantity, it is not a
+        quantity at all, and leaving a plausible number attached to a standing
+        verdict is how it ends up being read as one.
+        """
+        if not self._end_on_overrides_lying or result.pose != orient.POSE_LYING:
+            return result
+        if frame is None:
+            return result
+
+        x1, y1, x2, y2 = bbox
+        diagonal = math.hypot(max(1, x2 - x1), max(1, y2 - y1))
+        span_ratio = (result.stem_span_px or 0.0) / max(1.0, diagonal)
+        unconvincing = (
+            span_ratio < self._end_on_span_ratio_max
+            or result.confidence < self._end_on_conf_max
+        )
+        if not unconvincing:
+            return result
+
+        probability = self._end_on_probability(frame, bbox)
+        if probability is None:
+            return result
+        result.notes.append(f"end_on_p={probability:.2f}")
+        if probability <= self._end_on_threshold:
+            return result
+
+        stem_visible = bool(stem is not None and getattr(stem, "visible", False))
+        result.pose = (
+            orient.POSE_STANDING_STEM_UP if stem_visible
+            else orient.POSE_STANDING_STEM_DOWN
+        )
+        result.notes.append(
+            f"standing_from_silhouette (span_ratio={span_ratio:.2f}, "
+            f"was angle={result.angle_deg:.0f}deg)"
+            if result.angle_deg is not None else "standing_from_silhouette"
+        )
+        result.angle_deg = None
+        result.axis_deg = None
+        return result
+
     def _end_on_probability(self, frame, bbox) -> Optional[float]:
         """P(looking down this fruit's axis), or None when it cannot be read."""
         if frame is None:
@@ -336,6 +561,35 @@ class PaprikaEngine:
         if mask is None:
             return None
         return end_on_model.end_on_probability(
+            frame[bbox[1]:bbox[3], bbox[0]:bbox[2]], mask
+        )
+
+    def _raw_groove_axis(self, frame, bbox) -> Optional[tuple[float, float]]:
+        """(axis_deg, coherence) straight from end_on.groove_axis, ungated.
+
+        Shared by two callers that gate it differently for different
+        purposes, so the segmentation and the groove read happen in exactly
+        one place:
+
+        - `_groove_axis_estimate` turns this into a full Orientation once
+          coherence clears policy.min_groove_coherence, for a fruit with no
+          axis at all otherwise.
+        - `_apply_groove_crosscheck` compares it against an axis that
+          already exists, using the same coherence floor, and never
+          constructs an Orientation from it directly.
+
+        Returns None wherever end_on.groove_axis itself would: no frame, no
+        segmentable mask, or a surface too flat to have a groove direction at
+        all (see MIN_GROOVE_CONTRAST in end_on.py).
+        """
+        if frame is None:
+            return None
+        mask = orient.segment_fruit(
+            frame, bbox, saturation_floor=self._saturation_floor, belt_hue=self._belt_hue
+        )
+        if mask is None:
+            return None
+        return end_on_model.groove_axis(
             frame[bbox[1]:bbox[3], bbox[0]:bbox[2]], mask
         )
 
@@ -355,14 +609,7 @@ class PaprikaEngine:
         """
         if not self._groove_axis_fallback or frame is None:
             return None
-        mask = orient.segment_fruit(
-            frame, bbox, saturation_floor=self._saturation_floor, belt_hue=self._belt_hue
-        )
-        if mask is None:
-            return None
-        measured = end_on_model.groove_axis(
-            frame[bbox[1]:bbox[3], bbox[0]:bbox[2]], mask
-        )
+        measured = self._raw_groove_axis(frame, bbox)
         if measured is None:
             return None
         axis, coherence = measured
@@ -379,6 +626,43 @@ class PaprikaEngine:
             confidence=float(coherence),
             flip_confidence=0.0,
             notes=[f"groove_axis coherence={coherence:.2f}", "stem_end_unknown"],
+        )
+
+    def _apply_groove_crosscheck(
+        self, frame: np.ndarray, bbox, result: Orientation, colour: str
+    ) -> Orientation:
+        """Compare whatever axis the pipeline settled on against the grooves.
+
+        Runs on the FINAL candidate result for a fruit - keypoints, fused,
+        shape_only, or whatever uncertain_shape_crosscheck produced - after
+        every other branch above has had its say, and only once: comparing a
+        groove reading to itself is not a cross-check, which is why a fruit
+        already carrying `source == "grooves"` (the no-stem or low-confidence
+        fallback already answered from grooves directly) is left alone here.
+
+        See orient.groove_crosscheck for what this can and cannot change: an
+        angle it disagrees with gets flagged and its confidence cut, never
+        overwritten - the flip is never touched, because grooves cannot speak
+        to it.
+        """
+        if (
+            not self._groove_crosscheck
+            or result.angle_deg is None
+            or result.source == "grooves"
+            or frame is None
+            or colour.strip().lower() not in self._groove_crosscheck_colours
+        ):
+            return result
+        measured = self._raw_groove_axis(frame, bbox)
+        if measured is None:
+            return result
+        axis, coherence = measured
+        return orient.groove_crosscheck(
+            result,
+            axis,
+            coherence,
+            min_coherence=self._min_groove_coherence,
+            max_disagreement_deg=self._max_groove_disagreement_deg,
         )
 
     def _end_on_verdict(
@@ -550,12 +834,153 @@ class PaprikaEngine:
                 min_span_ratio=self._min_span_ratio,
             )
 
+        result = self._reconsider_standing(frame, bbox, result, stem)
+
         placement = self._placement_for(result)
+
+        # A stem WAS found here (this branch is only reached when reason was
+        # never "no_stem" above), so the fruit is not stemless - it simply was
+        # not trusted enough to place outright. Tightening stem detection to
+        # push more green fruit into the stemless fallback above does not fix
+        # that; it only trades one failure mode for the other, since that
+        # fallback runs the same width-profile geometry a real visible stem
+        # can corrupt (see the shape_orientation docstring in orientation.py
+        # for the measured version of that failure). Consulting the shape
+        # estimator here instead asks it to settle exactly what fuse() already
+        # knows how to settle - the flip - using the same arbitration
+        # shape_crosscheck performs, without another dial on the stem search.
+        if (
+            placement != PLACEMENT_PLACE
+            and self._uncertain_shape_crosscheck
+            and not use_shape
+            and frame is not None
+            and detection.get("colour", "").strip().lower() in self._uncertain_shape_colours
+        ):
+            uncertain_mask = orient.segment_fruit(
+                frame, bbox, saturation_floor=self._saturation_floor, belt_hue=self._belt_hue
+            )
+            shape_result = (
+                orient.shape_orientation(uncertain_mask) if uncertain_mask is not None else None
+            )
+            if shape_result is not None and shape_result.angle_deg is not None:
+                if result.confidence < self._min_usable_confidence:
+                    # fuse() always keeps the keypoint axis on the reasoning
+                    # that it was "produced" by a detector trained on this
+                    # exact fruit - but a self-check that collapsed quality
+                    # to (near) zero is the detector itself saying it does not
+                    # trust that axis either. Below the same floor that sends
+                    # a fruit to review anyway, keeping it would only be
+                    # honouring a technicality, not real evidence. Let shape
+                    # stand in fully here, the same as the genuinely stemless
+                    # case above, rather than asking fuse()'s modest
+                    # agreement bonus to climb out of a near-zero start.
+                    shape_result.notes.extend(result.notes)
+                    shape_result.notes.append(
+                        f"uncertain_stem_shape_crosscheck (stem confidence {result.confidence:.2f})"
+                    )
+                    result = shape_result
+                else:
+                    # Confidence is usable, only the flip (or the margin) was
+                    # in question - fuse()'s normal arbitration already
+                    # handles exactly this.
+                    fused = orient.fuse(result, shape_result)
+                    fused.notes.append("uncertain_stem_shape_crosscheck")
+                    result = fused
+                placement = self._placement_for(result)
+
+        # A fruit whose confidence collapsed still has a body lying on a belt,
+        # and its grooves still run along its axis. Falling back to them turns
+        # "human check needed" into an axis the operator and the log can use.
+        # Deliberately reached from HERE rather than only from the stem-not-
+        # found path: these fruit DO have a stem, it is simply not trusted, and
+        # an earlier revision wired the fallback somewhere they never pass.
+        #
+        # No flip is claimed, so the fruit still goes round again rather than
+        # being placed on an axis with an unknown end.
+        if placement == PLACEMENT_REVIEW and self._groove_axis_fallback:
+            from_grooves = self._groove_axis_estimate(frame, bbox)
+            if from_grooves is not None:
+                from_grooves.notes.extend(result.notes)
+                from_grooves.notes.append(
+                    f"low_confidence_fallback (was {result.confidence:.2f})"
+                )
+                result = from_grooves
+                placement = self._placement_for(result)
+
+        # A second opinion for a fruit that is, as of the line above, about
+        # to be placed - deliberately gated on that rather than run
+        # unconditionally, so a REORIENT/REJECT/REVIEW fruit is not paying for
+        # a check whose answer cannot change its outcome. Runs after every
+        # branch above that can still replace `result` wholesale (the
+        # uncertain_shape_crosscheck block and the review fallback just
+        # above), so this cannot be silently bypassed by one of them running
+        # afterwards and producing a fresh Orientation with no
+        # groove_agreement_deg set. Self-comparison is skipped inside
+        # _apply_groove_crosscheck for a fruit the review fallback already
+        # answered from grooves directly.
+        if placement == PLACEMENT_PLACE:
+            result = self._apply_groove_crosscheck(
+                frame, bbox, result, detection.get("colour", "")
+            )
+            placement = self._placement_for(result)
+
+        # Two guards on PLACING, both from the first ground-truth measurement
+        # this project has had: 470 hand-clicked stem positions scored against
+        # the detector. Overall the machine is good - placed fruit sit at a
+        # median of 2.4 degrees and 90% inside 10 - but the tail reaching the
+        # actuator was concentrated in two identifiable groups.
+        #
+        # shape_only: the stemless fallback. No stem was found, so the end is
+        # inferred from the silhouette alone. It was 1.2% of placements and 3
+        # of the 15 worst, landing 30 to 105 degrees out. An estimator that
+        # never saw a stem should not be trusted to say which end it is on.
+        #
+        # selfcheck_unavailable: the stability check could not run, so nothing
+        # verified this stem. 6.2% of placements and 5 of the 15 worst,
+        # including the single worst at 173 degrees off. Unverified is not the
+        # same as verified-good, and placing on it was reading it as the latter.
+        #
+        # Both fall back to reorient rather than reject: the fruit is fine, the
+        # measurement is simply not good enough to act on, and another pass may
+        # produce one that is. Costs about 7% of placements on the test set.
+        if placement == PLACEMENT_PLACE:
+            if self._require_verified_stem and result.source == "shape_only":
+                placement = PLACEMENT_REORIENT
+                result.notes.append("not_placed: shape_only")
+            elif (
+                self._require_verified_stem
+                and str(detection.get("stem_selfcheck", "skipped")) == "unavailable"
+            ):
+                placement = PLACEMENT_REORIENT
+                result.notes.append("not_placed: stem unverified")
+
+        # Below the usable floor the angle is withdrawn, not merely flagged.
+        # Leaving it in the result means the HMI dial still swings to it and
+        # the operator still reads a number - which is the thing this verdict
+        # exists to prevent. It is kept in the notes instead, where anyone
+        # reading the record back can see what was discarded and why.
+        withhold = placement == PLACEMENT_REVIEW or (
+            placement == PLACEMENT_UNKNOWN and self._hide_unknown_angle
+        )
+        if withhold and result.angle_deg is not None:
+            result.notes.append(
+                f"angle_withheld={result.angle_deg:.0f}deg "
+                f"confidence={result.confidence:.2f}"
+            )
+            result.angle_deg = None
+            result.axis_deg = None
 
         # A stem direction that moves with the light is not a direction. This
         # is measured per fruit by re-running the detection at two other gains,
         # so it reflects this fruit under this light rather than an average
         # taken over the dataset.
+        #
+        # An unavailable check reports a spread of 0.0, so it cannot trip the
+        # threshold below - no extra guard is needed here, only a note, so that
+        # a record showing spread 0 is not later mistaken for a rock-steady
+        # stem when in truth nobody managed to measure it.
+        if str(detection.get("stem_selfcheck", "skipped")) == "unavailable":
+            result.notes.append("selfcheck_unavailable")
         spread = float(detection.get("stem_spread_deg", 0.0) or 0.0)
         if placement == PLACEMENT_PLACE and spread > self._max_stem_spread_deg:
             placement = PLACEMENT_REORIENT

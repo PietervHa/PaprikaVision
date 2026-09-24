@@ -16,6 +16,7 @@ import uvicorn
 
 from backend.core.image_source import build_source
 from backend.core.config_loader import cfg
+from backend.core.manual_capture import ManualCapture
 from backend.core.state import AppState
 from backend.core.tcp_trigger_server import TCPTriggerServer
 from backend.core.vision import bind_app_state, run_vision
@@ -62,11 +63,8 @@ def _process_vision_result(result, trigger_time, app_state):
         log.error("Failed to process vision result: %s", exc)
 
 
-def vision_trigger_loop(camera, app_state):
-    """Manual trigger: press Q to run one cycle, same as the old project."""
+def vision_trigger_loop(camera, app_state, capture=None):
     import keyboard
-
-    log.info("Press Q to trigger a cycle. Ctrl+C to exit.")
 
     while True:
         try:
@@ -116,13 +114,30 @@ def main():
     display_host = "127.0.0.1" if web_cfg["host"] in ("0.0.0.0", "127.0.0.1", "localhost") else web_cfg["host"]
     log.info("HMI: http://%s:%s", display_host, web_cfg["port"])
 
+    # Hotkey capture of the current frame, for fruit the detector gets wrong.
+    # Reads the latest result rather than re-running vision, so pressing it
+    # never costs the line a cycle.
+    capture = ManualCapture(
+        frame_provider=camera.get_frame,
+        result_provider=lambda: app_state.get_snapshot().get("result"),
+        block=cfg.get("capture") if isinstance(cfg.get("capture"), dict) else {},
+    )
+    capture.start()
+
     TCPTriggerServer(
         camera=camera,
         run_vision_fn=run_vision,
         process_result_fn=lambda result, t: _process_vision_result(result, t, app_state),
     ).start()
 
-    vision_trigger_loop(camera, app_state)
+    try:
+        vision_trigger_loop(camera, app_state, capture)
+    except KeyboardInterrupt:
+        # Ctrl-C lands inside keyboard.wait() and dumped a stack trace on every
+        # shutdown. Stopping the app is not an error.
+        log.info("Shutting down")
+    finally:
+        capture.stop()
 
 
 if __name__ == "__main__":

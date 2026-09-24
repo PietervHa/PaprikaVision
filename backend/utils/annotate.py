@@ -32,10 +32,18 @@ _COLOR_STEM_KP = (80, 220, 80)
 _COLOR_BLOSSOM_KP = (220, 140, 60)
 _COLOR_OCCLUDED = (120, 120, 120)
 
+# Magenta for review, deliberately outside the green/amber/red family the other
+# verdicts use. Those three read as a scale from good to bad; a review is not a
+# point on that scale, it is the machine declining to place the fruit on it at
+# all, and an operator should be able to tell at a glance which kind of thing
+# they are looking at.
+_COLOR_REVIEW = (200, 60, 200)
+
 _PLACEMENT_COLORS = {
     "place": _COLOR_PLACE,
     "reorient": _COLOR_REORIENT,
     "reject": _COLOR_REJECT,
+    "review": _COLOR_REVIEW,
     "unknown": _COLOR_UNKNOWN,
 }
 

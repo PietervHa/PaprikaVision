@@ -26,6 +26,9 @@
   --place:    #46be5a;
   --reorient: #ebb43c;
   --reject:   #dc3c3c;
+  /* Outside the green/amber/red scale on purpose: a review is not a worse
+     verdict, it is the machine declining to give one. */
+  --review:   #c765d4;
 
   --radius: 6px;
 }
@@ -159,6 +162,7 @@ html, body {
 .angle-card.is-place    { border-top-color: var(--place) !important; }
 .angle-card.is-reorient { border-top-color: var(--reorient) !important; }
 .angle-card.is-reject   { border-top-color: var(--reject) !important; }
+.angle-card.is-review   { border-top-color: var(--review) !important; }
 
 #angleDial { display: block; }
 
@@ -177,6 +181,7 @@ html, body {
 .angle-card.is-place    .placement { color: var(--place); }
 .angle-card.is-reorient .placement { color: var(--reorient); }
 .angle-card.is-reject   .placement { color: var(--reject); }
+.angle-card.is-review   .placement { color: var(--review); }
 .pose { color: var(--text-dim); font-size: 0.86rem; }
 
 /* ---------------------------------------------------------------- meters */
@@ -222,6 +227,7 @@ html, body {
 .counter-ok span { color: var(--place); }
 .counter-reorient span { color: var(--reorient); }
 .counter-reject span { color: var(--reject); }
+.counter-review span { color: var(--review); }
 
 /* ------------------------------------------------------------- controls */
 

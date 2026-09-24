@@ -11,3 +11,9 @@ data/raw/
 models/*.pt
 runs/
 .pytest_cache/
+/yolo11n-pose.pt
+/yolo11n.pt
+/data/captures/
+/yolov8n-pose.pt
+/yolo11s-pose.pt
+/data/Paprika_testdata/

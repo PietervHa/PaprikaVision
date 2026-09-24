@@ -38,6 +38,7 @@ from backend.detection.paprika import classical
 from backend.detection.paprika import orientation as orient
 from backend.detection.paprika.orientation import Keypoint
 from backend.utils.logger import get_logger
+from backend.utils.paths import project_path
 
 log = get_logger(__name__)
 
@@ -81,7 +82,7 @@ class PaprikaDetector:
         )
 
         pose_cfg = cfg_block.get("pose") if isinstance(cfg_block.get("pose"), dict) else {}
-        self._model_path = str(pose_cfg.get("model_path", "models/paprika_pose.pt"))
+        self._model_path = str(project_path(pose_cfg.get("model_path"), "models/paprika_pose.pt"))
         self._imgsz = int(pose_cfg.get("imgsz", 640))
         self._kp_confidence = float(pose_cfg.get("keypoint_confidence", 0.30))
 
@@ -112,11 +113,37 @@ class PaprikaDetector:
 
             self._model = YOLO(self._model_path)
             log.info("Paprika pose model loaded: %s", self._model_path)
+            self._warm_up(self._model)
             return self._model
         except Exception as exc:
             log.error("Failed to load paprika pose model '%s': %s", self._model_path, exc)
             self._model_failed = True
             return None
+
+    def _warm_up(self, model) -> None:
+        """Run one throwaway inference so the first real frame is not the slow one.
+
+        A cold CUDA model compiles kernels, allocates workspace and initialises
+        cuDNN on its first call - seconds, not milliseconds. Without this that
+        cost lands on whichever fruit happens to arrive first after a restart,
+        which on a trigger-driven line means a missed piece rather than a slow
+        one. Doing it at load moves the cost to somewhere nobody is waiting.
+
+        Deliberately forgiving: a warm-up that fails has not broken anything
+        the next real call will not also hit and report properly, and refusing
+        to start over a throwaway inference would be worse than a slow frame.
+        """
+        try:
+            blank = np.zeros((self._imgsz, self._imgsz, 3), dtype=np.uint8)
+            start = time.perf_counter()
+            model.predict(blank, imgsz=self._imgsz, conf=self.confidence,
+                          verbose=False)
+            log.info(
+                "Paprika pose model warmed up in %.0f ms",
+                (time.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:
+            log.warning("Paprika pose warm-up skipped: %s", exc)
 
     def status(self) -> dict:
         return {
@@ -226,6 +253,7 @@ class PaprikaDetector:
                     "area_px": fruit.area,
                     "stem_method": fruit.stem_method,
                 "stem_area_ratio": float(fruit.stem_area_ratio),
+                "stem_selfcheck": str(fruit.stem_selfcheck),
                     "stem_quality": round(float(fruit.stem_quality or 0.0), 3),
                     "stem_spread_deg": float(fruit.stem_spread_deg or 0.0),
                     "colour": fruit.colour,

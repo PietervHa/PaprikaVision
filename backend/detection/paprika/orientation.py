@@ -17,9 +17,49 @@ on exactly the fruit you care about most.
    that axis says which end is the shoulder. This works on a fruit with no
    stem at all, because it never looks at the stem.
 
+   It also breaks on a fruit that DOES still have a stem, if that stem is
+   left in the mask: a visible stub sticking past the shoulder pulls that
+   end's slice of the width profile down towards the stem's own width
+   instead of the shoulder's, and on a real stemmed fruit that swing is
+   large enough to flip the sign with a confident-looking margin - not an
+   occasional miss, the measured case below flips every single time. So
+   before any of that geometry runs, `shape_orientation()` first asks
+   classical.stem_by_morphology() whether a stem-shaped protrusion is
+   sitting on the silhouette at all. Found: it is stripped out of the mask
+   the width profile is measured on, and its own position relative to the
+   body becomes the flip signal directly - a visible stem, however short,
+   is stronger evidence than a taper ever was, and it settles fruit the
+   width profile alone cannot (a near-round blokpaprika with no taper to
+   read). Not found: shape_orientation() falls back to the width profile
+   exactly as before.
+
 Neither is trusted blindly. `fuse()` combines them and reports which one won,
 so a disagreement is visible in the log and on the HMI instead of silently
 picking one.
+
+A third signal that does not share their blind spot
+-----------------------------------------------------
+Keypoints and shape both end up looking at the same evidence: a stem the
+pose model has to see, or a mask shape_orientation() has to segment out of
+the same frame. On a fruit where that evidence is misleading - a shadow
+that reads as a stem stub, a segmentation gap that flattens the taper -
+both can be confidently wrong together, and agreeing with itself is not
+independent confirmation.
+
+`end_on.groove_axis()` reads the fruit's own surface ridges instead of its
+outline: a pepper's grooves run stem to blossom, and their shared direction
+is the axis, measured from texture rather than from either mask. It cannot
+say which end holds the stem - a groove looks the same from both ends, see
+`end_on.groove_axis`'s own docstring - so `groove_crosscheck()` below never
+touches `angle_deg` or `flip_confidence`. What it does is compare that axis
+to whatever `fuse()` already settled on and, where a fruit's own grooves
+disagree by more than `policy.max_groove_disagreement_deg`, say so loudly
+enough for `PaprikaEngine._placement_for()` to reorient rather than place -
+the same "disagreement is a warning, not a tie to break" policy this module
+already applies to keypoints vs. shape, extended to a signal that does not
+run through either one's mask. Gated on `policy.min_groove_coherence`
+throughout, same as the runtime's groove fallback: a smooth fruit has no
+grooves to disagree WITH.
 
 Angle convention
 ----------------
@@ -54,6 +94,8 @@ from typing import Optional
 
 import cv2
 import numpy as np
+
+from backend.detection.paprika.classical import stem_by_morphology
 
 # Canonical keypoint order. Everything - the annotation spec, the dataset
 # validator, the trained model's output, and this module - agrees on this
@@ -126,13 +168,14 @@ class Orientation:
     pose: str = POSE_UNKNOWN
     elongation: float = 0.0        # major/minor axis ratio of the mask
     agreement_deg: Optional[float] = None  # keypoint vs shape disagreement
+    groove_agreement_deg: Optional[float] = None  # settled axis vs groove axis
     stem_present: bool = False
     stem_span_px: float = 0.0
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         data = asdict(self)
-        for key in ("angle_deg", "axis_deg", "agreement_deg"):
+        for key in ("angle_deg", "axis_deg", "agreement_deg", "groove_agreement_deg"):
             if data[key] is not None:
                 data[key] = round(float(data[key]), 2)
         for key in ("confidence", "flip_confidence", "elongation", "stem_span_px"):
@@ -156,6 +199,23 @@ def angular_difference(a: float, b: float) -> float:
     """Smallest absolute difference between two directions, 0-180."""
     diff = abs(_norm360(a) - _norm360(b)) % 360.0
     return diff if diff <= 180.0 else 360.0 - diff
+
+
+def axis_difference(a: float, b: float) -> float:
+    """Smallest difference between two AXES (0-180 orientations), 0-90.
+
+    `angular_difference` treats its inputs as directions - 0 and 180 are
+    opposite ends of the fruit, maximally different. An axis has no ends: a
+    groove reading of 175 and a keypoint direction of 10 describe the same
+    line through the fruit, not a near-180-degree disagreement. Reuses
+    `angular_difference` rather than a second formula, so the runtime
+    cross-check and the offline scorer in `tools/eval_estimators.py` (which
+    delegates its own `axis_error_deg` here) cannot drift onto two different
+    definitions of "how far apart are two axes" - the same reason
+    `vector_to_angle` was pulled out on its own below.
+    """
+    diff = angular_difference(a, b)
+    return diff if diff <= 90.0 else 180.0 - diff
 
 
 def vector_to_angle(dx: float, dy: float) -> float:
@@ -363,11 +423,23 @@ def _principal_axis(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, float, 
     return centroid, major, major_sd, minor_sd
 
 
+# A protrusion may not remove more than this fraction of the mask's own area
+# before it stops being treated as a stem. A genuine stem stub is nowhere
+# close: across every protrusion stem_by_morphology() found on the 254
+# labelled crops in data/debug/labelling, the largest was 32% of the fruit's
+# area, p95 was 7% and the median 2%. Above 50% what was "removed" is most of
+# the silhouette - a shadow crease or a segmentation gap read as an opening -
+# and treating that as a stem would hollow the fruit out rather than clean it
+# up.
+PROTRUSION_MAX_AREA_RATIO = 0.5
+
+
 def shape_orientation(
     mask: np.ndarray,
     bins: int = 12,
     end_fraction: float = 0.3,
     min_elongation: float = 1.12,
+    detect_protrusion: bool = True,
 ) -> Orientation:
     """Estimate orientation from fruit silhouette alone.
 
@@ -377,21 +449,52 @@ def shape_orientation(
     stem. That is the entire point of this estimator: it is the one that still
     works on a fruit whose stem broke off in the crate.
 
+    But most fruit reaching this path have NOT lost their stem - they simply
+    were not trusted by the colour/morphology route, or shape is being run
+    as a crosscheck alongside it. A visible stem stub, left in the mask, is
+    not neutral: it drags that end's slice of the width profile toward the
+    stem's own (narrow) width instead of the shoulder's, and on a real
+    stemmed fruit the swing is large enough to flip the sign with a
+    confident-looking margin every time - see the module docstring. So
+    before any width-profile geometry runs, this asks
+    classical.stem_by_morphology() - the same colour-independent "open with a
+    kernel wider than the stem" search classical.py uses - whether a
+    stem-shaped protrusion sits on the silhouette at all:
+
+    - Found: it is subtracted out of the mask the width profile is measured
+      on, so the profile describes the body alone, and the protrusion's own
+      position relative to the body becomes the flip signal directly. A
+      visible stem, however short, is stronger evidence than a taper - it is
+      also the one signal that still works on a near-round blokpaprika, which
+      has essentially no taper to read (see `shape_crosscheck` in
+      config/default.yaml for how badly the taper-only version of this
+      function did on real, mostly-round fruit).
+    - Not found: falls back to the width profile exactly as before. Nothing
+      here changes a stemless fruit's answer.
+
     Args:
-        mask:            uint8 mask of one fruit (0/255).
-        bins:            slices along the long axis for the width profile.
-        end_fraction:    fraction of the length at each end that counts as
-                         "the end" when comparing widths.
-        min_elongation:  below this major/minor ratio the fruit is too round
-                         for a long axis to mean anything - report standing
-                         rather than inventing an axis out of noise.
+        mask:              uint8 mask of one fruit (0/255).
+        bins:              slices along the long axis for the width profile.
+        end_fraction:      fraction of the length at each end that counts as
+                           "the end" when comparing widths.
+        min_elongation:    below this major/minor ratio the BODY (after any
+                           protrusion is removed) is too round for a long axis
+                           to mean anything from width alone - but a
+                           protrusion found on a round body still yields an
+                           angle, since its direction does not depend on the
+                           body having a taper.
+        detect_protrusion: set False to measure the raw mask exactly as the
+                           original width-profile-only version did - useful
+                           for comparing the two directly in tools/tune_shape.py.
 
     Returns:
         An Orientation carrying angles only - no positions - so nothing here
         needs the crop offset added back on: a direction measured inside the
         crop is the same direction in the full frame. `flip_confidence` is the
-        number to watch: it is how strongly the two ends actually differed,
-        and it collapses toward zero on a symmetric fruit.
+        number to watch: it is how strongly the ends differed (width route) or
+        how well the protrusion's own kernel-scale agreement held up
+        (protrusion route), and it collapses toward zero on a fruit shape
+        cannot settle either way.
     """
     result = Orientation(source="shape")
 
@@ -404,15 +507,56 @@ def shape_orientation(
         result.notes.append("mask_too_small")
         return result
 
-    points = np.column_stack([xs, ys]).astype(np.float64)
+    # Strip a stem-shaped protrusion, if any, before any axis is measured -
+    # see the docstring above for why leaving it in corrupts the geometry
+    # rather than merely adding noise to it.
+    protrusion: Optional[np.ndarray] = None
+    protrusion_quality = 0.0
+    body = mask
+    if detect_protrusion:
+        found, quality = stem_by_morphology(mask)
+        if found is not None:
+            candidate_body = cv2.subtract(mask, found)
+            if int((candidate_body > 0).sum()) >= (1.0 - PROTRUSION_MAX_AREA_RATIO) * int(
+                (mask > 0).sum()
+            ):
+                body, protrusion, protrusion_quality = candidate_body, found, quality
+            else:
+                result.notes.append("protrusion_rejected_too_large")
+
+    body_ys, body_xs = np.nonzero(body)
+    if len(body_xs) < 30:
+        # A genuine stem stub can never take the body below this - getting
+        # here means the "protrusion" WAS most of the fruit. Measure the
+        # untouched mask rather than reporting nothing.
+        body = mask
+        protrusion = None
+        body_ys, body_xs = ys, xs
+
+    points = np.column_stack([body_xs, body_ys]).astype(np.float64)
     centroid, major, major_sd, minor_sd = _principal_axis(points)
 
     elongation = major_sd / max(minor_sd, 1e-6)
     result.elongation = elongation
 
-    if elongation < min_elongation:
-        # Round silhouette: the fruit is standing on an end, pointing at the
-        # camera. Which end is up is not answerable from the outline alone.
+    # Where the protrusion sits relative to the body, in body-radii. Computed
+    # up front because it is needed both to decide whether a round body still
+    # gets an answer and, later, as the confidence in that answer.
+    protrusion_centroid: Optional[np.ndarray] = None
+    protrusion_offset_ratio = 0.0
+    if protrusion is not None:
+        p_ys, p_xs = np.nonzero(protrusion)
+        if len(p_xs) > 0:
+            protrusion_centroid = np.array([p_xs.mean(), p_ys.mean()])
+            body_radius = math.sqrt(max(int((body > 0).sum()), 1) / math.pi)
+            protrusion_offset_ratio = float(
+                np.linalg.norm(protrusion_centroid - centroid) / max(body_radius, 1e-6)
+            )
+
+    if elongation < min_elongation and protrusion_centroid is None:
+        # Round silhouette, no visible stem either: the fruit is standing on
+        # an end, pointing at the camera. Which end is up is not answerable
+        # from the outline alone.
         result.pose = POSE_UNKNOWN
         result.notes.append(f"too_round (elongation={elongation:.2f})")
         return result
@@ -427,7 +571,10 @@ def shape_orientation(
     t_min, t_max = float(t.min()), float(t.max())
     length = max(t_max - t_min, 1e-6)
 
-    # Width profile: how wide the fruit is at each slice along its length.
+    # Width profile: how wide the BODY is at each slice along its length. Runs
+    # unconditionally, even when a protrusion will decide the answer below -
+    # it is cheap, and comparing the two signals is exactly what tells a
+    # frame worth a second look apart from one where they simply agree.
     edges = np.linspace(t_min, t_max, bins + 1)
     widths = np.zeros(bins)
     for i in range(bins):
@@ -448,8 +595,61 @@ def shape_orientation(
     # the midpoint of its own length.
     midpoint = (t_min + t_max) / 2.0
     mass_signal = float(np.clip((0.0 - midpoint) / (length / 2.0), -1.0, 1.0))
-
     combined = 0.75 * width_signal + 0.25 * mass_signal
+
+    if protrusion_centroid is not None:
+        direction = protrusion_centroid - centroid
+        direction_norm = float(np.linalg.norm(direction))
+        if direction_norm > 1e-6:
+            stem_direction = direction / direction_norm
+            width_profile_direction = major if combined >= 0 else -major
+            if float(stem_direction @ width_profile_direction) < 0:
+                # The taper and the visible stem point different ways. The
+                # protrusion still wins - it is direct evidence, the taper is
+                # an inference - but a frame where they disagree is worth
+                # finding again later, not silently overwritten.
+                result.notes.append("protrusion_overrides_width_profile")
+
+            result.axis_deg = _norm180(vector_to_angle(stem_direction[0], stem_direction[1]))
+            result.angle_deg = vector_to_angle(stem_direction[0], stem_direction[1])
+
+            # First-pass estimate, not yet checked against labelled angles:
+            # a protrusion that barely clears the centroid is weaker evidence
+            # than one standing a full body-radius clear of it. Floor of 0.5
+            # rather than 0.0 because reaching this point already required
+            # stem_by_morphology's own two-of-three kernel-scale agreement -
+            # this is additional evidence on top of that, not the only
+            # evidence. Re-check with tools/tune_shape.py once labelled
+            # angles exist for real crops, the same way the 4.0 below was.
+            result.confidence = float(
+                np.clip(0.5 + 0.5 * min(1.0, protrusion_offset_ratio), 0.0, 1.0)
+            )
+            # stem_by_morphology's own quality is kernel-scale agreement,
+            # which is exactly "how much do I trust this IS the stem" - the
+            # same question flip_confidence answers here.
+            result.flip_confidence = float(protrusion_quality)
+
+            result.notes.append(
+                f"protrusion_offset_ratio={protrusion_offset_ratio:.2f} "
+                f"protrusion_quality={protrusion_quality:.2f}"
+            )
+            result.notes.append(
+                f"width_signal={width_signal:+.3f} mass_signal={mass_signal:+.3f}"
+            )
+            return result
+
+        # A protrusion sitting exactly on the centroid carries no direction of
+        # its own - fall through to the width profile as if none were found.
+        result.notes.append("protrusion_at_centroid_ignored")
+
+    if elongation < min_elongation:
+        # Reachable only via the fallthrough above: a protrusion was found
+        # but gave no usable direction, and the body itself is too round for
+        # the width profile to answer either.
+        result.pose = POSE_UNKNOWN
+        result.notes.append(f"too_round (elongation={elongation:.2f})")
+        return result
+
     stem_direction = major if combined >= 0 else -major
 
     result.axis_deg = _norm180(vector_to_angle(major[0], major[1]))
@@ -472,6 +672,11 @@ def shape_orientation(
     # tools/tune_shape.py prints `combined` per image for exactly this.
     result.flip_confidence = float(np.clip(abs(combined) * 4.0, 0.0, 1.0))
 
+    if protrusion is not None:
+        # Found, but gave no usable direction (handled above) - noted here so
+        # a fruit with a real but centred stem is distinguishable in the log
+        # from one that never had a protrusion candidate at all.
+        result.notes.append("protrusion_found_but_ambiguous")
     result.notes.append(f"width_signal={width_signal:+.3f} mass_signal={mass_signal:+.3f}")
     return result
 
@@ -564,6 +769,68 @@ def fuse(
         merged.notes.append("estimators_agree")
 
     return merged
+
+
+def groove_crosscheck(
+    result: Orientation,
+    groove_axis_deg: Optional[float],
+    coherence: Optional[float],
+    min_coherence: float = 0.35,
+    max_disagreement_deg: float = 30.0,
+) -> Orientation:
+    """Check a settled axis against the fruit's own surface grooves.
+
+    See the module docstring for why this exists as a third signal rather
+    than a third vote: it reads texture, not either mask, so it can catch
+    the case where keypoints and shape are wrong in the same direction
+    because they were looking at the same misleading evidence.
+
+    Deliberately narrow. This never sets `angle_deg` or touches
+    `flip_confidence` - a groove has no front or back, so it is not
+    evidence about which end the stem is on, only about the line through
+    the fruit. It only ever:
+
+    - records the disagreement in `groove_agreement_deg`, so
+      `PaprikaEngine._placement_for()` can reorient on it exactly as it
+      already does for `agreement_deg` (keypoints vs. shape), and
+    - cuts `confidence` on disagreement, the same way `fuse()` does for its
+      own two estimators - not a substitute for the hard stop, since a
+      confidence multiplier alone was already shown not to reliably trigger
+      it (see
+      `tests/test_disagreement_gate.py::test_confidence_alone_would_not_have_caught_it`).
+
+    Agreement is recorded (`groove_agreement_deg`, a "groove_agrees" note)
+    but does NOT raise confidence the way disagreement lowers it: a groove
+    reading carries its own few-degree noise even at good coherence (see the
+    "GROOVE AXIS BY COHERENCE" table `tools/eval_estimators.py` prints), so
+    landing close to the settled axis is milder evidence than landing far
+    from it is - rewarding it the same amount either direction would let a
+    merely-average groove reading manufacture confidence the estimators
+    themselves never earned.
+
+    A no-op whenever there is nothing to compare: no settled angle or no
+    groove reading at all. A reading that WAS taken but is too faint to
+    trust (`coherence < min_coherence` - the same floor the runtime's own
+    groove fallback uses) is also skipped, but says so in `notes`, since
+    that is a different situation from no reading existing in the first
+    place.
+    """
+    if result.angle_deg is None or groove_axis_deg is None or coherence is None:
+        return result
+    if coherence < min_coherence:
+        result.notes.append(f"groove_crosscheck_skipped coherence={coherence:.2f}")
+        return result
+
+    disagreement = axis_difference(result.angle_deg, groove_axis_deg)
+    result.groove_agreement_deg = disagreement
+
+    if disagreement > max_disagreement_deg:
+        result.confidence *= 0.6
+        result.notes.append(f"groove_disagreement={disagreement:.0f}deg")
+    else:
+        result.notes.append("groove_agrees")
+
+    return result
 
 
 # ------------------------------------------------------------------ helpers

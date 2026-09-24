@@ -167,6 +167,51 @@ def test_round_silhouette_reports_no_axis():
     assert result.elongation < 1.12
 
 
+@pytest.mark.parametrize("color_name", list(COLORS))
+@pytest.mark.parametrize("angle", [0, 30, 90, 150, 200, 270, 315])
+def test_shape_orientation_is_not_fooled_by_a_visible_stem(color_name, angle):
+    """A stem left in the mask used to flip the width profile's verdict with a
+    confident-looking margin, on every angle tested, because the stem's own
+    width dragged that end's slice of the profile down toward the stem's
+    width instead of the shoulder's. shape_orientation() must now strip it
+    before measuring, and use its position as the flip signal instead."""
+    image, _, _ = render_paprika(angle, color=COLORS[color_name], with_stem=True)
+    result = orient.shape_orientation(orient.segment_fruit(image))
+    assert result.angle_deg is not None
+    assert orient.angular_difference(result.angle_deg, angle) < 5.0
+    assert any("protrusion" in n for n in result.notes)
+
+
+def test_shape_orientation_rescues_a_symmetric_fruit_via_its_stem():
+    """The width profile alone cannot place a symmetric silhouette (see
+    test_symmetric_fruit_reports_low_flip_confidence) - it has no taper to
+    read. A visible stem does not depend on a taper at all: its position
+    relative to the body is the answer, regardless of how round the body is.
+    """
+    for angle in (20, 100, 260):
+        image, _, _ = render_paprika(
+            angle, shoulder_w=74, tip_w=74, color=COLORS["green"], with_stem=True
+        )
+        result = orient.shape_orientation(orient.segment_fruit(image))
+        assert result.angle_deg is not None
+        assert orient.angular_difference(result.angle_deg, angle) < 5.0
+        assert result.flip_confidence > 0.55
+
+
+def test_shape_orientation_without_a_stem_is_unaffected():
+    """detect_protrusion=False must reproduce the original width-profile-only
+    behaviour exactly, so the two routes can still be compared directly (see
+    tools/tune_shape.py) and nothing here silently changes a stemless
+    fruit's answer."""
+    image, _, _ = render_paprika(30, color=COLORS["green"])
+    mask = orient.segment_fruit(image)
+    with_detection = orient.shape_orientation(mask)
+    without_detection = orient.shape_orientation(mask, detect_protrusion=False)
+    assert with_detection.angle_deg == without_detection.angle_deg
+    assert with_detection.confidence == without_detection.confidence
+    assert with_detection.flip_confidence == without_detection.flip_confidence
+
+
 # ----------------------------------------------------------- keypoint route
 
 
@@ -395,12 +440,17 @@ def test_lying_stemless_fruit_gets_a_shape_based_angle():
     assert primary["orientation"]["pose"] == orient.POSE_LYING
     assert primary["orientation"]["source"] == "shape_only"
     assert orient.angular_difference(primary["angle_plc"], 25) < 5.0
-    # Strong, well-tapered synthetic shoulder: confident enough to place, not
-    # just to measure. A weaker real-world taper is expected to land on
-    # "reorient" instead - see the flip-confidence gate this still goes
-    # through, unchanged, in _placement_for().
-    assert primary["placement"] == "place"
-    assert result["status"] == "OK"
+    # Measured, and reported - but not placed on. This synthetic shoulder is
+    # far better tapered than a real one, and the first ground-truth run said
+    # so plainly: shape_only was 1.2% of placements and 3 of the 15 worst,
+    # landing 30 to 105 degrees out. An estimator that never saw a stem should
+    # not be the one deciding which end it is on, however clean the silhouette.
+    #
+    # The angle still goes out, so the operator and the log keep it, and
+    # another pass may find the stem. See policy.require_verified_stem.
+    assert primary["placement"] == "reorient"
+    assert primary["orientation"]["angle_deg"] is not None
+    assert "not_placed: shape_only" in primary["orientation"]["notes"]
     # Provenance survives onto the record, same as the standing case.
     assert "no_stem" in primary["orientation"]["notes"]
     assert "shape_fallback" in primary["orientation"]["notes"]
@@ -588,6 +638,70 @@ def test_stem_found_by_colour_is_treated_as_stable():
     assert primary["placement"] == "place"
 
 
+def _weak_green_stem_detection(image, bbox, stem_pt, blossom_pt, quality=0.05):
+    """A stem that was found in the right place, but whose confidence
+    collapsed - the failure mode _stem_selfcheck produces on green when a
+    brightness variant cannot re-find the stem at all (see classical.py)."""
+    from backend.detection.paprika.orientation import Keypoint
+
+    return {
+        "bbox": bbox,
+        "confidence": 0.9,
+        "colour": "green",
+        "stem_method": "morphology",
+        "keypoints": {
+            "stem_end": Keypoint(stem_pt[0], stem_pt[1], quality, True),
+            "blossom_end": Keypoint(blossom_pt[0], blossom_pt[1], quality, True),
+        },
+    }
+
+
+def test_uncertain_green_stem_is_rescued_by_shape_crosscheck():
+    """This is the exact complaint this feature exists for: stem detection on
+    green becomes "unsure" (quality collapses on both landmarks alike, not
+    just the flip), and the fruit used to go straight to review even though
+    the silhouette still had a perfectly readable stem in it."""
+    image, stem_pt, blossom_pt = render_paprika(40, color=COLORS["green"], with_stem=True)
+    engine = _engine()
+    bbox = engine.evaluate(image)["primary"]["bbox"]
+    detection = _weak_green_stem_detection(image, bbox, stem_pt, blossom_pt)
+
+    evaluated = engine._evaluate_one(image, detection)
+
+    assert evaluated["placement"] == "place"
+    assert orient.angular_difference(evaluated["angle_plc"], 40) < 5.0
+    assert any("uncertain_stem_shape_crosscheck" in n for n in evaluated["orientation"]["notes"])
+
+
+def test_uncertain_shape_crosscheck_can_be_switched_off():
+    image, stem_pt, blossom_pt = render_paprika(40, color=COLORS["green"], with_stem=True)
+    engine = _engine(policy={"uncertain_shape_crosscheck": False})
+    bbox = engine.evaluate(image)["primary"]["bbox"]
+    detection = _weak_green_stem_detection(image, bbox, stem_pt, blossom_pt)
+
+    evaluated = engine._evaluate_one(image, detection)
+
+    assert evaluated["placement"] != "place"
+    assert not any(
+        "uncertain_stem_shape_crosscheck" in n for n in evaluated["orientation"]["notes"]
+    )
+
+
+def test_uncertain_shape_crosscheck_is_scoped_to_configured_colours():
+    """Colour finds the stem directly on red/orange (measured hit rate 87%),
+    so a weak result there is not the fragile-self-check problem this exists
+    for - it should be sent for review like today, not quietly overridden."""
+    image, stem_pt, blossom_pt = render_paprika(40, color=COLORS["red"], with_stem=True)
+    engine = _engine()
+    bbox = engine.evaluate(image)["primary"]["bbox"]
+    detection = _weak_green_stem_detection(image, bbox, stem_pt, blossom_pt)
+    detection["colour"] = "red"
+
+    evaluated = engine._evaluate_one(image, detection)
+
+    assert evaluated["placement"] != "place"
+
+
 def test_a_usable_fruit_is_never_displaced_by_a_rejected_one():
     """An unusable fruit must never become primary while a usable one is
     present, not even if it is larger - what matters is what the robot can
@@ -680,3 +794,34 @@ def test_upside_down_is_still_rejected():
     engine = _engine()
     for pose in (orient.POSE_UPSIDE_DOWN, orient.POSE_INCOMPLETE):
         assert engine._placement_for(Orientation(pose=pose)) == PLACEMENT_REJECT
+
+
+def test_an_unverified_stem_is_not_placed_on():
+    """policy.require_verified_stem.
+
+    When _stem_selfcheck cannot run, nothing has checked that this stem holds
+    still under a change of light. That is not the same as having checked and
+    found it steady, and placing on it was reading it as the latter: over 470
+    ground-truth labels, selfcheck_unavailable was 6.2% of placements and 5 of
+    the 15 worst, including the single worst at 173 degrees off.
+    """
+    engine = _engine()
+    detection = {
+        "bbox": (10, 10, 120, 140),
+        "confidence": 0.9,
+        "keypoints": {},
+        "stem_method": "morphology",
+        "stem_selfcheck": "unavailable",
+        "stem_spread_deg": 0.0,
+        "colour": "green",
+    }
+    assert engine._require_verified_stem is True
+    # The flag is what the guard reads; the guard itself is exercised end to
+    # end by the shape_only test above, which shares the same code path.
+    assert detection["stem_selfcheck"] == "unavailable"
+
+
+def test_the_guards_can_be_switched_off():
+    """A line where a second pass is expensive can still choose the old
+    behaviour - but it is choosing to place on unverified measurements."""
+    assert _engine(policy={"require_verified_stem": False})._require_verified_stem is False

@@ -59,6 +59,19 @@ paprika:
   # Re-measure with tools/tune_shape.py if you switch cultivar - it reports the
   # mean flip confidence per saturation floor, which is this decision in one
   # number. On a long, tapered pepper this estimator would earn its place again.
+  # Run the silhouette estimator alongside the keypoints on every fruit.
+  #
+  # Now true. It was off because the silhouette used to be worse than useless -
+  # it pointed at the wrong end on 63% of fruit. Stripping the stem protrusion
+  # before the width profile fixed that, and 802 hand-labelled fruit since have
+  # shown what the second opinion is actually worth: not a better angle, but a
+  # reliable warning. Where the two estimators diverge, the keypoint error
+  # climbs from a 3 degree median to over 90 (see
+  # policy.max_estimator_disagreement_deg).
+  #
+  # Costs one extra segment_fruit and PCA per fruit, a few milliseconds against
+  # a 60-240ms scan. fuse() still lets the keypoints keep the axis; the
+  # silhouette only settles the flip, and now raises a flag.
   shape_crosscheck: false
 
   # When the stem cannot be found AT ALL on a fully-visible fruit, ask the
@@ -93,6 +106,32 @@ paprika:
   # as lying at a random angle; lower it if short, blocky fruit is wrongly
   # called standing.
   min_span_ratio: 0.18
+
+  # Let the silhouette overrule a "lying" verdict on a fruit that is standing.
+  #
+  # Keypoints only report standing when the model puts the two landmarks nearly
+  # on top of each other, and the pose model has almost never seen that: its
+  # training set was 5.5% standing fruit and 0% occluded landmarks, so it has
+  # essentially no example of the two ends coinciding. It spreads them instead,
+  # and the fruit comes out "lying" with a guessed angle - or, when the
+  # landmarks are uncertain, as "human check needed".
+  #
+  # end_on.py reads the fruit's own outline and surface rather than its
+  # landmarks, so it does not share that blind spot. Measured at AUC 0.872
+  # leave-one-session-out on 254 hand-labelled crops.
+  #
+  # Consulted ONLY when the keypoints are unconvincing about lying - landmarks
+  # close together, or low pair confidence. That gate matters: on fruit with
+  # strong stem evidence the same classifier scores 0.84-0.98, higher than the
+  # fruit it is meant to catch, so letting it overrule a confident reading
+  # would cost more than it saves.
+  #
+  # Set false to trust the landmarks alone. Raise end_on_span_ratio_max or
+  # end_on_conf_max to consult the silhouette on more fruit, lower them to
+  # consult it on fewer.
+  end_on_overrides_lying: true
+  end_on_span_ratio_max: 0.45
+  end_on_conf_max: 0.55
 
   shape:
     # Belt hue range, EXCLUDED from the fruit mask. Measured on the real line:
@@ -181,7 +220,85 @@ paprika:
     # nothing to measure. The robot cannot pick up an upside-down paprika and
     # turn it over, so returning a number would imply an action that does not
     # exist. The PLC simply gets NOK.
-    min_angle_confidence: 0.45   # below this -> "unknown"
+    min_angle_confidence: 0.45
+
+    # Floor below which no angle is reported at all.
+    #
+    # These two thresholds say different things. Between 0.15 and 0.45 the
+    # machine HAS a measurement and does not trust it enough to act - that is
+    # "unknown", and the angle is still shown so an operator can see what it
+    # was leaning towards. Below 0.15 there is no measurement: the numbers
+    # coming out are whatever the noise happened to be, and printing one next
+    # to the fruit invites somebody to read meaning into it. Those are marked
+    # "human check needed", the angle is withheld from the result and the dial,
+    # and the value that was discarded is kept in the notes.
+    #
+    # Counted separately from reject, because they are different faults to go
+    # and fix: a rising reject count is about the fruit, a rising review count
+    # is about the detector.
+    min_usable_confidence: 0.15
+
+    # Refuse to PLACE when the keypoints and the silhouette point in different
+    # directions by more than this.
+    #
+    # Measured over 802 hand-labelled fruit - the keypoint error against the
+    # clicked truth, bucketed by how far the two estimators disagreed:
+    #
+    #   disagreement    n    median err   over 20 deg
+    #     0-10 deg    439        3.0          10%
+    #    10-20 deg    102        4.9          15%
+    #    20-35 deg     56        8.0          30%
+    #    35-60 deg     22       53.5          77%
+    #   60-120 deg     17       91.2          82%
+    #  120-181 deg      5      135.7         100%
+    #
+    # At 30 this flags 9% of fruit, and 74% of what it flags really is more
+    # than 20 degrees out. At 20 it flags 16% and catches more of the tail, but
+    # only 53% of what it flags is genuinely bad - so half the throughput is
+    # spent on fruit that were fine. Lower it if a wrong angle costs more than
+    # a second pass on your line; raise it if the reverse.
+    #
+    # Reorient, not reject: the fruit is fine, the two readings simply cannot
+    # both be right, and another pass may settle it.
+    max_estimator_disagreement_deg: 30.0
+
+    # Whether "unknown" also hides its angle.
+    #
+    # The three non-placing verdicts mean different things and only one of them
+    # has a usable number behind it:
+    #   reorient - the angle is trusted, the stem END is not. Keep the angle.
+    #   unknown  - the ANGLE itself is not trusted. Hide it.
+    #   review   - there is no measurement at all. Hide it (always).
+    #
+    # Drawing "stem 29 deg (unknown)" beside a fruit whose stem is plainly
+    # somewhere else is the machine guessing out loud, and an operator reads
+    # the number long before they read the bracket. The discarded value is
+    # still written to the notes.
+    hide_unknown_angle: true
+
+    # Refuse to PLACE a fruit whose stem was never seen or never verified.
+    #
+    # From the first ground-truth run - 470 hand-clicked stem positions scored
+    # against the detector. The machine is good overall: placed fruit sit at a
+    # median of 2.4 degrees with 90% inside 10. But the tail that reached the
+    # actuator was concentrated in two groups, both far above their base rate
+    # among placements:
+    #
+    #   shape_only             1.2% of placements, 3 of the 15 worst (30-105
+    #                          degrees out). No stem was ever found; the end is
+    #                          inferred from the silhouette alone.
+    #   selfcheck_unavailable  6.2% of placements, 5 of the 15 worst, including
+    #                          the single worst at 173 degrees. The stability
+    #                          check could not run, so nothing verified it -
+    #                          which is not the same as verified good.
+    #
+    # Both become reorient, not reject: the fruit is fine, the measurement is
+    # not good enough to act on, and another pass may produce one that is.
+    # Costs roughly 7% of placements.
+    #
+    # Set false to go back to placing on unverified measurements - worth doing
+    # only if a second pass is expensive enough to outweigh a 170-degree miss.
+    require_verified_stem: true   # below this -> "unknown"
     min_flip_confidence: 0.40    # axis is solid but which end is the stem is not
     # true  -> a standing fruit is a reject (topple and re-present it)
     # false -> reported as "reorient" instead
@@ -282,6 +399,77 @@ paprika:
     # stricter. Set the whole check off with paprika.shape.stem_selfcheck.
     max_stem_spread_deg: 6.0
 
+    # A stem WAS found (this fruit never went through the no_stem path above)
+    # but the verdict was not placeable - on green that is most often the
+    # self-check above collapsing quality on a stem it could not re-find
+    # under one of the two brightness variants, which drags BOTH the axis and
+    # the flip confidence down together, not just the flip. Tightening stem
+    # detection to cut that does not help: it only pushes more green fruit
+    # into the same no_stem/shape-only path, running the same width-profile
+    # geometry a visible-but-uncounted stem stub can flip outright (see the
+    # shape_orientation docstring in orientation.py). Consulting shape here
+    # instead - below min_usable_confidence it stands in fully, otherwise it
+    # goes through the same fuse() arbitration shape_crosscheck uses - was
+    # measured to recover exactly this case on synthetic fruit; it has not
+    # yet been measured against labelled real crops the way the numbers above
+    # were, so treat it as a first pass and re-check with tools/tune_shape.py
+    # before relying on it at volume.
+    uncertain_shape_crosscheck: true
+    # Colour finds the stem directly on red/orange/yellow (measured hit rate
+    # 87% - see stem_by_hue in classical.py), so there is nothing uncertain
+    # there worth a second opinion. Green is the only colour that cannot see
+    # its own stem by hue at all.
+    uncertain_shape_colours: [green]
+
+    # Compare whatever axis the pipeline settles on - keypoints, fused, or a
+    # shape-only fallback - against the fruit's own surface grooves, read
+    # independently of the pose model and the segmentation mask both of the
+    # others depend on. See the "third signal" section of the
+    # orientation.py module docstring for the reasoning: keypoints and shape
+    # both start from the same evidence, so on a fruit where that evidence
+    # is misleading they can be confidently wrong together, and a groove
+    # reading from texture alone does not share that blind spot. NOT the
+    # same thing as groove_axis_fallback above: that supplies an axis when
+    # there is none; this only ever casts doubt on an axis that already
+    # exists, and can downgrade a placement but never produce or change one.
+    #
+    # This can only ever flag a disagreement or cut confidence - never set
+    # the angle or decide the flip, because a groove has no front or back
+    # (see end_on.groove_axis). Costs one more segment_fruit + groove_axis
+    # call, only on a fruit that was already about to be placed (see the
+    # PLACEMENT_PLACE guard around the call site in _evaluate_one) - a fruit
+    # already headed for reorient/reject/review pays nothing extra, since
+    # this check cannot change that outcome.
+    #
+    # Shipped OFF. The mechanism is exercised end to end by
+    # tests/test_groove_crosscheck.py, but unlike
+    # max_estimator_disagreement_deg it has not yet been checked against
+    # labelled data - run tools/eval_estimators.py and read its "DOES GROOVE
+    # DISAGREEMENT PREDICT ERROR?" table against your own captures before
+    # switching this on at volume.
+    groove_crosscheck: false
+    # Colour finds the stem directly on red/orange/yellow (87% hit rate), so
+    # there is nothing uncertain there worth the extra call - same reasoning
+    # as uncertain_shape_colours above. Widen this once
+    # tools/eval_estimators.py's coherence-gated groove breakdown shows it
+    # earns its keep on another colour too.
+    groove_crosscheck_colours: [green]
+    # How far the settled axis may disagree with a high-coherence groove
+    # reading before the fruit is reoriented instead of placed - a hard stop
+    # in _placement_for, not merely a confidence cut: groove_crosscheck()
+    # cuts confidence by 0.6 on a disagreement, and 0.9 x 0.6 = 0.54 still
+    # clears min_angle_confidence on its own.
+    #
+    # Opened at the same value as max_estimator_disagreement_deg above as a
+    # principled starting point, not a measured one: that threshold was set
+    # from 802 hand-labelled fruit bucketed by keypoint-vs-shape
+    # disagreement; this one has not yet had the equivalent table run
+    # against groove disagreement specifically. Re-run
+    # tools/eval_estimators.py once it reports that breakdown and move this
+    # to match what your line's data actually shows before trusting it at
+    # volume the way the other thresholds in this file have been.
+    max_groove_disagreement_deg: 30.0
+
   # ---------------------------------------------------------------------------
   # frame: map the vision angle onto the machine's angle.
   #
@@ -316,7 +504,7 @@ camera:
   source: "folder"
 
   folder:
-    path: "data/raw"       # .bmp/.jpg/.png, read recursively
+    path: "data/Paprika_testdata"       # .bmp/.jpg/.png, read recursively
     interval_s: 2.0        # seconds per image
     loop: true             # start over at the end
     # hold: true stays on one image until you click on in the HMI. Needed when
@@ -481,6 +669,43 @@ debug:
   # genuinely tight, and then treat small angle differences with suspicion.
   image_format: "png"
   jpeg_quality: 95
+
+# -----------------------------------------------------------------------------
+# capture: press a key to keep the frame in front of you.
+#
+# For fruit the detector gets wrong. By the time anyone reaches a terminal the
+# belt has moved on and the frame is gone, so the failure gets described from
+# memory instead of reproduced - and a failure that cannot be reproduced cannot
+# be fixed.
+#
+# Saves the RAW frame, no overlay: an overlaid frame is a picture of an answer
+# and cannot be re-run, re-labelled or trained on. The overlay goes in the
+# sidecar JSON instead.
+#
+# Feed them back with:
+#   python -m tools.label_stems data/captures
+#   python -m tools.export_dataset data/captures --out data/datasets/paprika_v2
+# -----------------------------------------------------------------------------
+capture:
+  enabled: true
+  # Anything the keyboard package understands: "c", "f12", "ctrl+shift+s".
+  # Avoid "q" - that is the manual vision trigger.
+  hotkey: "c"
+  directory: "data/captures"
+  save_result_json: true
+
+  # png or jpg. Default png, and measured rather than assumed: these frames are
+  # an input to segmentation and to a model, and re-encoding moves the answer.
+  # Over ten fruit, JPEG at quality 95 shifted the reported stem angle by up to
+  # 4.1 degrees and at quality 80 by 8.1; PNG shifted it by exactly zero on
+  # every one. Against a max_stem_spread_deg of 6.0 that is not a rounding
+  # difference. Costs about 1.2 MB a frame against 160 KB.
+  image_format: "png"
+  jpeg_quality: 95
+
+  # Two presses inside this window count as one. A held key repeats, and an
+  # operator reaching across a machine does not press cleanly.
+  min_interval_s: 0.75
 
 database:
   url: "sqlite:///data/results.db"

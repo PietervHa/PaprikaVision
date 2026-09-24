@@ -217,6 +217,11 @@ STEM_REFINE_MIN_OVERLAP = 0.35
 
 STEM_QUALITY_HUE = 0.92
 
+# The control pass for the stem self-check: the same re-detection at unchanged
+# brightness. Its job is to separate "this stem moves under a light change"
+# from "the check cannot see this stem even without one".
+SELFCHECK_CONTROL_GAIN = 1.0
+
 # Angular disagreement between kernel scales at which the stem direction is
 # considered worthless. Chosen against the policy: a fruit whose scales differ
 # by this much is exactly the fruit whose reported angle jumps between frames.
@@ -306,6 +311,10 @@ class ClassicalFruit:
     # while lying blossom-up scored 0.0034 to 0.0127. Carried forward so the
     # policy can decline to trust a stem it can barely see.
     stem_area_ratio: float = 0.0
+    # ok | unavailable | skipped. "unavailable" means the self-check's own
+    # re-detection could not see the stem even at unchanged brightness, so its
+    # silence says nothing about the fruit.
+    stem_selfcheck: str = "skipped"
     standing: bool = False
     edge_clipped: bool = False
     # Why no coordinates can be derived here. Empty means the fruit is usable.
@@ -755,7 +764,7 @@ def _stem_by_hue(
     return stem
 
 
-def _stem_by_morphology(fruit: np.ndarray) -> tuple[Optional[np.ndarray], float]:
+def stem_by_morphology(fruit: np.ndarray) -> tuple[Optional[np.ndarray], float]:
     """Stem as a thin protrusion, independent of colour.
 
     The fruit is first scaled to a fixed reference radius, so the morphology
@@ -768,6 +777,15 @@ def _stem_by_morphology(fruit: np.ndarray) -> tuple[Optional[np.ndarray], float]
     so a few pixels of segmentation difference between frames changed what
     survived the opening, and the reported angle jumped. Requiring agreement
     turns that brittleness into an honest "no stem".
+
+    Public (no leading underscore) because orientation.shape_orientation() also
+    calls this directly: the boundary/silhouette route needs to know about a
+    visible stem stub for exactly the same reason this module does - a thin
+    protrusion the width-profile heuristic cannot explain - and a second
+    reimplementation of "open with a kernel wider than the stem" would drift
+    from this one the first time either was tuned. Takes a plain 0/255 mask
+    and returns nothing colour-specific, so there is no dependency the other
+    direction: classical.py still knows nothing about orientation.py.
     """
     area = int((fruit > 0).sum())
     if area <= 0:
@@ -850,12 +868,29 @@ def _stem_by_morphology(fruit: np.ndarray) -> tuple[Optional[np.ndarray], float]
 
 def _stem_direction(fruit: np.ndarray) -> Optional[float]:
     """Direction from the fruit centroid to the calyx, or None."""
-    stem, _ = _stem_by_morphology(fruit)
+    stem, _ = stem_by_morphology(fruit)
     if stem is None:
         return None
     centre = _mask_centroid(fruit)
     calyx = _calyx_from_stem(stem, centre, fruit)
     return math.degrees(math.atan2(-(calyx[1] - centre[1]), calyx[0] - centre[0])) % 360.0
+
+
+def _direction_at_gain(
+    region: np.ndarray,
+    gain: float,
+    belt_hue: tuple[int, int],
+    saturation_floor: int,
+    value_floor: int,
+) -> Optional[float]:
+    """Re-segment at a brightness gain and re-find the stem direction."""
+    scaled = np.clip(region.astype(np.float32) * gain, 0, 255).astype(np.uint8)
+    mask, _ = fruit_mask(scaled, belt_hue, saturation_floor, value_floor)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    if count <= 1:
+        return None
+    largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    return _stem_direction((labels == largest).astype(np.uint8) * 255)
 
 
 def _stem_selfcheck(
@@ -864,36 +899,49 @@ def _stem_selfcheck(
     saturation_floor: int,
     value_floor: int,
     baseline_deg: float,
-) -> float:
+) -> Optional[float]:
     """How far the stem direction moves when the light changes.
 
-    Returns the largest angular disagreement in degrees, or a large value when
-    a gain variant loses the stem entirely - losing the stem under an 8%
-    lighting change is itself the strongest possible evidence that this stem
-    was never solidly established.
-    """
-    angles = [baseline_deg]
+    Returns the largest angular disagreement in degrees, 180.0 when a gain
+    variant loses a stem the control could see, or None when the check could
+    not be run at all.
 
-    # Downscaled first. This check only has to answer whether the direction
-    # moves by more than a few degrees, and at full resolution it was the
-    # single most expensive thing in a busy frame.
+    That last case is why this returns Optional. An earlier version returned a
+    flat 180 whenever a variant failed, and the caller turned 180 into a
+    quality of exactly zero. On red that never mattered, because colour finds
+    the stem and this check never runs. On GREEN it is the only judge of
+    quality there is - and it was failing every time. Measured over the
+    labelled crops: 39 of 40 variant attempts could not re-find the stem at
+    all, so every green fruit that reached here was scored as maximally
+    unstable and went out as "human check needed" with the stem plainly
+    visible in the picture.
+    """
+    # The control runs the check's OWN re-detection at unchanged brightness.
+    # If that cannot find the stem, nothing the gain variants do afterwards is
+    # evidence about the fruit - the check simply does not work on this fruit,
+    # and saying so is different from condemning the stem. _stem_direction
+    # re-runs morphology on a freshly segmented mask, which is the fragile step
+    # the whole check depends on and the one that was quietly failing.
     longest = max(region.shape[:2])
     if longest > SELFCHECK_MAX_DIMENSION:
         factor = SELFCHECK_MAX_DIMENSION / longest
         region = cv2.resize(region, None, fx=factor, fy=factor,
                             interpolation=cv2.INTER_AREA)
 
+    control = _direction_at_gain(
+        region, SELFCHECK_CONTROL_GAIN, belt_hue, saturation_floor, value_floor
+    )
+    if control is None:
+        return None
+
+    angles = [baseline_deg, control]
     for gain in STEM_SELFCHECK_GAINS:
-        scaled = np.clip(region.astype(np.float32) * gain, 0, 255).astype(np.uint8)
-        mask, _ = fruit_mask(scaled, belt_hue, saturation_floor, value_floor)
-
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
-        if count <= 1:
-            return 180.0
-        largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-
-        direction = _stem_direction((labels == largest).astype(np.uint8) * 255)
+        direction = _direction_at_gain(
+            region, gain, belt_hue, saturation_floor, value_floor
+        )
         if direction is None:
+            # Now this IS evidence: the control saw the stem at this exact
+            # brightness and an 8% change lost it.
             return 180.0
         angles.append(direction)
 
@@ -1214,7 +1262,7 @@ def find_fruit(
                     int((stem_mask > 0).sum()) / max(1, int((blob > 0).sum()))
                 )
         if stem_mask is None:
-            stem_mask, quality = _stem_by_morphology(blob)
+            stem_mask, quality = stem_by_morphology(blob)
             if stem_mask is not None:
                 fruit.stem_method = "morphology"
                 fruit.stem_area_ratio = float(
@@ -1238,11 +1286,24 @@ def find_fruit(
                     spread = _stem_selfcheck(
                         region, belt_hue, saturation_floor, value_floor, baseline
                     )
-                    fruit.stem_spread_deg = round(float(spread), 1)
-                    fruit.stem_quality = float(
-                        np.clip(1.0 - spread / (STEM_SELFCHECK_LIMIT_DEG * 2.0), 0.0, 1.0)
-                    )
+                    if spread is None:
+                        # The check could not run. Fall back to what morphology
+                        # itself reported, which is exactly what happens when
+                        # the check is switched off - an unavailable check must
+                        # leave the fruit no worse off than never having asked.
+                        fruit.stem_selfcheck = "unavailable"
+                        fruit.stem_spread_deg = 0.0
+                        fruit.stem_quality = quality
+                    else:
+                        fruit.stem_selfcheck = "ok"
+                        fruit.stem_spread_deg = round(float(spread), 1)
+                        fruit.stem_quality = float(
+                            np.clip(
+                                1.0 - spread / (STEM_SELFCHECK_LIMIT_DEG * 2.0), 0.0, 1.0
+                            )
+                        )
                 else:
+                    fruit.stem_selfcheck = "skipped"
                     fruit.stem_quality = quality
 
         if stem_mask is None:
