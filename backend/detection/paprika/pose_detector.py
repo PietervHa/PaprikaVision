@@ -38,7 +38,13 @@ from backend.detection.paprika import classical
 from backend.detection.paprika import orientation as orient
 from backend.detection.paprika.orientation import Keypoint
 from backend.utils.logger import get_logger
+from backend.detection.paprika.classical import EDGE_MARGIN_PX
 from backend.utils.paths import project_path
+
+# Share of the bounding-box perimeter that may lie on the frame border before
+# the fruit counts as incomplete. Calibrated against classical.edge_cut_ratio
+# on 170 fruit: see _bbox_edge_cut.
+BBOX_EDGE_CUT_THRESHOLD = 0.23
 
 log = get_logger(__name__)
 
@@ -265,6 +271,36 @@ class PaprikaDetector:
 
     # ------------------------------------------------------------ pose route
 
+    @staticmethod
+    def _bbox_edge_cut(bbox, frame_shape, margin: int = EDGE_MARGIN_PX) -> float:
+        """How much of a box sits on the frame border, without needing a mask.
+
+        classical.edge_cut_ratio measures the fruit's own outline against the
+        border, which is the better measure and needs a segmentation the pose
+        backend does not produce. This is its bbox-only stand-in: the share of
+        the box perimeter lying on the border.
+
+        Calibrated against the real measure on 170 fruit from 99 belt frames.
+        Fruit the classical detector calls clipped score 0.231 to 0.406 here;
+        fruit it calls clean score 0.000 to 0.269. At 0.23 this catches 27 of
+        27 clipped and wrongly flags 4 of 143 clean - and a false flag costs a
+        reorient, while a miss puts a half-seen fruit on the line with a
+        confident angle taken from landmarks that are partly off the frame.
+        """
+        height, width = frame_shape[:2]
+        x1, y1, x2, y2 = bbox
+        box_w, box_h = max(1, x2 - x1), max(1, y2 - y1)
+        on_border = 0
+        if x1 <= margin:
+            on_border += box_h
+        if y1 <= margin:
+            on_border += box_w
+        if x2 >= width - margin:
+            on_border += box_h
+        if y2 >= height - margin:
+            on_border += box_w
+        return on_border / float(2 * (box_w + box_h))
+
     def _detect_pose(self, frame: np.ndarray) -> list[dict]:
         with self._model_lock:
             model = self._load_model()
@@ -324,6 +360,15 @@ class PaprikaDetector:
                 detections.append(
                     {
                         "bbox": [x1, y1, x2, y2],
+                        # Without this the engine never sees a reason to call
+                        # the fruit incomplete: _UNPICKABLE_POSES keys off
+                        # "edge_clipped", the pose path never set it, and a
+                        # fruit running off the frame was measured as though it
+                        # were whole - landmarks partly outside the image and
+                        # all.
+                        "edge_clipped": self._bbox_edge_cut(
+                            (x1, y1, x2, y2), frame.shape
+                        ) > BBOX_EDGE_CUT_THRESHOLD,
                         "confidence": round(float(box_conf[i]), 3) if i < len(box_conf) else 0.0,
                         "keypoints": landmarks,
                         "area_px": max(0, (x2 - x1) * (y2 - y1)),

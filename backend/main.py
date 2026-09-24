@@ -63,6 +63,29 @@ def _process_vision_result(result, trigger_time, app_state):
         log.error("Failed to process vision result: %s", exc)
 
 
+def _live_result(app_state) -> dict:
+    """Whatever the machine last actually decided, from either path.
+
+    The overlay worker and the trigger loop write to different places and only
+    one of them is running at a time. Preferring the overlay when it is fresh
+    covers frame-stepping in the HMI; falling back to latest_result covers a
+    live line.
+    """
+    import time as _time
+
+    overlay = app_state.get_overlay(now=_time.time())
+    if not overlay.get("stale") and overlay.get("detections"):
+        return {
+            "status": "OK",
+            "detections": overlay.get("detections") or [],
+            "primary": overlay.get("primary"),
+            "processing_time_ms": overlay.get("scan_ms"),
+            "source": "overlay",
+        }
+    result = dict(app_state.get_snapshot().get("result") or {})
+    result["source"] = "trigger"
+    return result
+
 def vision_trigger_loop(camera, app_state, capture=None):
     import keyboard
 
@@ -119,7 +142,13 @@ def main():
     # never costs the line a cycle.
     capture = ManualCapture(
         frame_provider=camera.get_frame,
-        result_provider=lambda: app_state.get_snapshot().get("result"),
+        # The overlay first. latest_result is only written by the trigger loop,
+        # so while an operator is stepping through frames in the HMI - which is
+        # exactly when they notice a bad detection and reach for the key - it
+        # holds an empty dict, and every sidecar came out saying
+        # {"detections": [], "primary": None}. The whole diagnostic half of a
+        # capture was being thrown away at the moment it was most wanted.
+        result_provider=lambda: _live_result(app_state),
         block=cfg.get("capture") if isinstance(cfg.get("capture"), dict) else {},
     )
     capture.start()
