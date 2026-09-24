@@ -37,6 +37,30 @@ Neither is trusted blindly. `fuse()` combines them and reports which one won,
 so a disagreement is visible in the log and on the HMI instead of silently
 picking one.
 
+A third signal that does not share their blind spot
+-----------------------------------------------------
+Keypoints and shape both end up looking at the same evidence: a stem the
+pose model has to see, or a mask shape_orientation() has to segment out of
+the same frame. On a fruit where that evidence is misleading - a shadow
+that reads as a stem stub, a segmentation gap that flattens the taper -
+both can be confidently wrong together, and agreeing with itself is not
+independent confirmation.
+
+`end_on.groove_axis()` reads the fruit's own surface ridges instead of its
+outline: a pepper's grooves run stem to blossom, and their shared direction
+is the axis, measured from texture rather than from either mask. It cannot
+say which end holds the stem - a groove looks the same from both ends, see
+`end_on.groove_axis`'s own docstring - so `groove_crosscheck()` below never
+touches `angle_deg` or `flip_confidence`. What it does is compare that axis
+to whatever `fuse()` already settled on and, where a fruit's own grooves
+disagree by more than `policy.max_groove_disagreement_deg`, say so loudly
+enough for `PaprikaEngine._placement_for()` to reorient rather than place -
+the same "disagreement is a warning, not a tie to break" policy this module
+already applies to keypoints vs. shape, extended to a signal that does not
+run through either one's mask. Gated on `policy.min_groove_coherence`
+throughout, same as the runtime's groove fallback: a smooth fruit has no
+grooves to disagree WITH.
+
 Angle convention
 ----------------
 `angle_deg` is the direction pointing FROM the blossom end TOWARD the stem end
@@ -144,13 +168,14 @@ class Orientation:
     pose: str = POSE_UNKNOWN
     elongation: float = 0.0        # major/minor axis ratio of the mask
     agreement_deg: Optional[float] = None  # keypoint vs shape disagreement
+    groove_agreement_deg: Optional[float] = None  # settled axis vs groove axis
     stem_present: bool = False
     stem_span_px: float = 0.0
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         data = asdict(self)
-        for key in ("angle_deg", "axis_deg", "agreement_deg"):
+        for key in ("angle_deg", "axis_deg", "agreement_deg", "groove_agreement_deg"):
             if data[key] is not None:
                 data[key] = round(float(data[key]), 2)
         for key in ("confidence", "flip_confidence", "elongation", "stem_span_px"):
@@ -174,6 +199,21 @@ def angular_difference(a: float, b: float) -> float:
     """Smallest absolute difference between two directions, 0-180."""
     diff = abs(_norm360(a) - _norm360(b)) % 360.0
     return diff if diff <= 180.0 else 360.0 - diff
+
+
+def axis_difference(a: float, b: float) -> float:
+    """Smallest difference between two AXES (0-180 orientations), 0-90.
+
+    An axis has no front or back - a groove reading of 175 and a keypoint
+    direction of 10 describe the same line through the fruit, not a near
+    180-degree disagreement. Folding both onto 0-180 first and then onto
+    0-90 is what `tools/eval_estimators.py`'s `axis_error_deg` already does
+    for scoring against ground truth; this is the same formula, in one
+    place, so the runtime cross-check and the offline scorer cannot drift
+    apart the way keypoint and shape angle math briefly did before
+    `vector_to_angle` was pulled out for the same reason.
+    """
+    return abs((_norm180(a) - _norm180(b) + 90.0) % 180.0 - 90.0)
 
 
 def vector_to_angle(dx: float, dy: float) -> float:
@@ -727,6 +767,58 @@ def fuse(
         merged.notes.append("estimators_agree")
 
     return merged
+
+
+def groove_crosscheck(
+    result: Orientation,
+    groove_axis_deg: Optional[float],
+    coherence: Optional[float],
+    min_coherence: float = 0.35,
+    disagreement_threshold_deg: float = 30.0,
+) -> Orientation:
+    """Check a settled axis against the fruit's own surface grooves.
+
+    See the module docstring for why this exists as a third signal rather
+    than a third vote: it reads texture, not either mask, so it can catch
+    the case where keypoints and shape are wrong in the same direction
+    because they were looking at the same misleading evidence.
+
+    Deliberately narrow. This never sets `angle_deg` or touches
+    `flip_confidence` - a groove has no front or back, so it is not
+    evidence about which end the stem is on, only about the line through
+    the fruit. It only ever:
+
+    - records the disagreement in `groove_agreement_deg`, so
+      `PaprikaEngine._placement_for()` can reorient on it exactly as it
+      already does for `agreement_deg` (keypoints vs. shape), and
+    - nudges `confidence` up on agreement or down on disagreement, the same
+      modest way `fuse()` does for its own two estimators - not a
+      substitute for the hard stop, since a confidence multiplier alone was
+      already shown not to reliably trigger it (see
+      `tests/test_disagreement_gate.py::test_confidence_alone_would_not_have_caught_it`).
+
+    A no-op whenever there is nothing to compare: no settled angle, no
+    groove reading, or a groove reading too faint to trust
+    (`coherence < min_coherence` - the same floor the runtime's own groove
+    fallback uses, for the same reason: below it the "axis" is just the
+    direction of whatever noise happened to be strongest).
+    """
+    if result.angle_deg is None or groove_axis_deg is None or coherence is None:
+        return result
+    if coherence < min_coherence:
+        return result
+
+    disagreement = axis_difference(result.angle_deg, groove_axis_deg)
+    result.groove_agreement_deg = disagreement
+
+    if disagreement > disagreement_threshold_deg:
+        result.confidence *= 0.6
+        result.notes.append(f"groove_axis_disagreement={disagreement:.0f}deg")
+    else:
+        result.confidence = float(min(1.0, result.confidence * 1.05))
+        result.notes.append("groove_agrees")
+
+    return result
 
 
 # ------------------------------------------------------------------ helpers

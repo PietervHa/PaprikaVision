@@ -79,6 +79,13 @@ def shape_settings(cfg):
     }
 
 
+def policy_settings(cfg):
+    policy = ((cfg.get("paprika") or {}).get("policy") or {})
+    return {
+        "min_groove_coherence": float(policy.get("min_groove_coherence", 0.35)),
+    }
+
+
 def error_deg(predicted, truth) -> float:
     """Direction error, 0-180. Which end the stem is on counts."""
     return abs(((predicted - truth + 180) % 360) - 180)
@@ -90,8 +97,13 @@ def axis_error_deg(predicted, truth) -> float:
     The grooves cannot tell which end carries the stem - they give an
     orientation, not a direction - so scoring them as a direction would report
     a coin flip and say nothing about the quantity they actually measure.
+
+    Delegates to orient.axis_difference so this offline scorer and the
+    runtime's groove_crosscheck() can never drift onto two different
+    definitions of "how far apart are two axes" - see that function's
+    docstring.
     """
-    return abs(((predicted - truth + 90) % 180) - 90)
+    return orient.axis_difference(predicted, truth)
 
 
 def report(name: str, errors: list) -> None:
@@ -120,6 +132,7 @@ def main() -> int:
 
     cfg = load_config(args.config)
     settings = shape_settings(cfg)
+    min_groove_coherence = policy_settings(cfg)["min_groove_coherence"]
     labels_path = Path(args.labels).resolve() / "stem_labels.json"
     if not labels_path.exists():
         print(f"No labels at {labels_path}")
@@ -164,7 +177,7 @@ def main() -> int:
             row = {"colour": colour, "stem_method": match.stem_method,
                    "keypoints": None, "shape": None, "fused": None,
                    "kp_axis": None, "groove_axis": None, "groove_plus_kp": None,
-                   "coherence": None}
+                   "coherence": None, "groove_kp_disagreement": None}
 
             # --- keypoints alone -------------------------------------------
             kp_result = None
@@ -198,6 +211,22 @@ def main() -> int:
             # measure the axis directly off the fruit's own surface bands, and
             # cannot speak to the flip at all. If that holds, taking the axis
             # from one and the flip from the other beats either alone.
+            #
+            # groove_axis itself is stored UNGATED - the coherence-by-band
+            # table further down needs the full range, including the low end,
+            # to show where the floor should sit. groove_plus_kp is the
+            # column that claims to say what the pipeline would actually
+            # produce, and the pipeline never trusts a groove reading below
+            # policy.min_groove_coherence (see PaprikaEngine._groove_axis_estimate
+            # and _apply_groove_crosscheck) - so this column is gated the same
+            # way, or it silently reports a fusion the runtime would never
+            # perform, diluted by every smooth, low-coherence fruit whose
+            # "axis" was noise. An earlier revision of this tool computed it
+            # ungated, which is why the direction table used to make
+            # groove_plus_kp look worse than keypoints alone even on green:
+            # most of the 802 fruit sit below coherence 0.25 (see GROOVE AXIS
+            # BY COHERENCE below), and every one of them was dragging this
+            # average toward its own noise.
             if mask is not None:
                 gx1, gy1, gx2, gy2 = match.bbox
                 measured = end_on.groove_axis(frame[gy1:gy2, gx1:gx2], mask)
@@ -205,13 +234,26 @@ def main() -> int:
                     groove, coherence = measured
                     row["coherence"] = coherence
                     row["groove_axis"] = axis_error_deg(groove, truth)
-                    if kp_result is not None and kp_result.angle_deg is not None:
+                    if (
+                        coherence >= min_groove_coherence
+                        and kp_result is not None
+                        and kp_result.angle_deg is not None
+                    ):
                         # Keep the groove axis; choose the end the keypoints
                         # lean towards.
                         options = (groove % 360.0, (groove + 180.0) % 360.0)
                         best = min(options,
                                    key=lambda a: error_deg(a, kp_result.angle_deg))
                         row["groove_plus_kp"] = error_deg(best, truth)
+                        # Exactly the comparison orient.groove_crosscheck()
+                        # makes at runtime (PaprikaEngine._apply_groove_crosscheck),
+                        # at the same coherence floor - see DOES GROOVE
+                        # DISAGREEMENT PREDICT ERROR? below for whether
+                        # policy.max_groove_disagreement_deg (30 degrees,
+                        # unmeasured) is actually the right place to draw it.
+                        row["groove_kp_disagreement"] = axis_error_deg(
+                            groove, kp_result.angle_deg
+                        )
             if kp_result is not None and kp_result.angle_deg is not None:
                 row["kp_axis"] = axis_error_deg(kp_result.angle_deg, truth)
 
@@ -260,6 +302,12 @@ def main() -> int:
         print(f"\n  stem_method = {method}  ({len(subset)} fruit)")
         for key in ("keypoints", "shape", "fused"):
             report("    " + key, [r[key] for r in subset if r[key] is not None])
+        # groove_axis is reported here too, and it matters most on exactly
+        # the stem_method=none rows: that is the population keypoints and
+        # fused have "no measurements" for above, because there is no stem
+        # for the pose model to have found in the first place. It is an AXIS
+        # error (0-90), not comparable to the DIRECTION rows above it.
+        report("    groove_axis", [r["groove_axis"] for r in subset if r["groove_axis"] is not None])
 
     print("\n" + "=" * 70)
     print("GROOVE AXIS BY COHERENCE")
@@ -314,10 +362,55 @@ def main() -> int:
                   f"  flipped {int((a>120).sum())}")
             print(f"     flagged: median {np.median(d):5.1f}  >20deg {100*(d>20).mean():3.0f}%"
                   f"  flipped {int((d>120).sum())}")
+    print("\n" + "=" * 70)
+    print("DOES GROOVE DISAGREEMENT PREDICT ERROR?")
+    print("  Same question as above, for the OTHER cross-check: when a")
+    print("  high-coherence groove reading disagrees with the keypoint axis,")
+    print("  is the keypoint more often wrong? If so, this is what")
+    print("  policy.max_groove_disagreement_deg (paprika_engine.py's")
+    print("  groove_crosscheck) should be set from - it currently is not,")
+    print("  since it was opened at the same 30 degrees as the kp-vs-shape")
+    print("  gate without this table to check it against.")
+    groove_kp = [r for r in rows if r["groove_kp_disagreement"] is not None
+                 and r["keypoints"] is not None]
+    if groove_kp:
+        print(f"\n  {'disagreement':>16}{'n':>6}{'kp median':>11}{'kp p90':>9}"
+              f"{'kp >20deg':>11}{'flipped':>9}")
+        for low, high in ((0, 10), (10, 20), (20, 35), (35, 60), (60, 120), (120, 181)):
+            band = [r for r in groove_kp if low <= r["groove_kp_disagreement"] < high]
+            if not band:
+                continue
+            errors = np.array([r["keypoints"] for r in band])
+            print(f"  {f'{low}-{high} deg':>16}{len(band):>6}{np.median(errors):>11.1f}"
+                  f"{np.percentile(errors, 90):>9.1f}"
+                  f"{100 * (errors > 20).mean():>10.0f}%"
+                  f"{int((errors > 120).sum()):>9}")
+        for cut in (20, 30, 45):
+            agree = [r for r in groove_kp if r["groove_kp_disagreement"] < cut]
+            differ = [r for r in groove_kp if r["groove_kp_disagreement"] >= cut]
+            if not differ:
+                continue
+            a = np.array([r["keypoints"] for r in agree])
+            d = np.array([r["keypoints"] for r in differ])
+            print(f"\n  gate at {cut} deg: would flag {len(differ)} of {len(groove_kp)} "
+                  f"fruit ({100 * len(differ) / len(groove_kp):.0f}%)")
+            print(f"     kept   : median {np.median(a):5.1f}  >20deg {100*(a>20).mean():3.0f}%"
+                  f"  flipped {int((a>120).sum())}")
+            print(f"     flagged: median {np.median(d):5.1f}  >20deg {100*(d>20).mean():3.0f}%"
+                  f"  flipped {int((d>120).sum())}")
+    else:
+        print("\n  No fruit had both a usable keypoint angle and a groove reading")
+        print("  above min_groove_coherence - nothing to measure this against yet.")
+
     print()
     print("If shape's median beats keypoints' on a colour, fuse() is holding it")
     print("back there: it currently lets the silhouette settle only the flip,")
     print("never the axis. If shape is worse, the present policy is right.")
+    print()
+    print("groove_plus_kp above is now gated at policy.min_groove_coherence, the")
+    print("same floor PaprikaEngine trusts a groove reading at - it reports what")
+    print("the pipeline would actually produce, not every fruit a groove_axis()")
+    print("call happened to return something for.")
     return 0
 
 

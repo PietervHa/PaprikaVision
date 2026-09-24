@@ -421,6 +421,41 @@ paprika:
     # its own stem by hue at all.
     uncertain_shape_colours: [green]
 
+    # Compare whatever axis the pipeline settles on - keypoints, fused, or a
+    # shape-only fallback - against the fruit's own surface grooves, read
+    # independently of the pose model and the segmentation mask both of the
+    # others depend on. See the "third signal" section of the
+    # orientation.py module docstring for the reasoning: keypoints and shape
+    # both start from the same evidence, so on a fruit where that evidence
+    # is misleading they can be confidently wrong together, and a groove
+    # reading from texture alone does not share that blind spot.
+    #
+    # This can only ever flag a disagreement or nudge confidence - never set
+    # the angle or decide the flip, because a groove has no front or back
+    # (see end_on.groove_axis). Costs one more segment_fruit + groove_axis
+    # call, already paid on every fruit the groove_axis_fallback path or the
+    # review fallback below touches; this is the same call made on fruit
+    # that otherwise had a perfectly good stem.
+    groove_crosscheck: true
+    # Colour finds the stem directly on red/orange/yellow (87% hit rate), so
+    # there is nothing uncertain there worth the extra call - same reasoning
+    # as uncertain_shape_colours above. Widen this once
+    # tools/eval_estimators.py's coherence-gated groove breakdown shows it
+    # earns its keep on another colour too.
+    groove_crosscheck_colours: [green]
+    # How far the settled axis may disagree with a high-coherence groove
+    # reading before the fruit is reoriented instead of placed.
+    #
+    # Opened at the same value as max_estimator_disagreement_deg above as a
+    # principled starting point, not a measured one: that threshold was set
+    # from 802 hand-labelled fruit bucketed by keypoint-vs-shape
+    # disagreement; this one has not yet had the equivalent table run
+    # against groove disagreement specifically. Re-run
+    # tools/eval_estimators.py once it reports that breakdown and move this
+    # to match what your line's data actually shows before trusting it at
+    # volume the way the other thresholds in this file have been.
+    max_groove_disagreement_deg: 30.0
+
   # ---------------------------------------------------------------------------
   # frame: map the vision angle onto the machine's angle.
   #
@@ -455,7 +490,7 @@ camera:
   source: "folder"
 
   folder:
-    path: "data/raw"       # .bmp/.jpg/.png, read recursively
+    path: "data/Paprika_testdata"       # .bmp/.jpg/.png, read recursively
     interval_s: 2.0        # seconds per image
     loop: true             # start over at the end
     # hold: true stays on one image until you click on in the HMI. Needed when
