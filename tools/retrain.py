@@ -88,6 +88,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backend.utils.paths import project_path  # noqa: E402
+from tools import dataset_manifest as dm  # noqa: E402
 
 IMAGE_SUFFIXES = {".bmp", ".jpg", ".jpeg", ".png"}
 
@@ -278,6 +279,19 @@ def main() -> int:
 
     if not args.dry_run:
         carried, added = merge_datasets(bases, staged if sources else None, out_dir)
+        # Parents recorded by content id as well as path: folders get moved and
+        # renamed, and what was actually trained on does not change when they do.
+        parents = []
+        for base in bases:
+            parent = dm.read(base)
+            parents.append({
+                "name": base.name,
+                "path": str(base),
+                "content_id": (parent or {}).get("content_id") or dm.content_id(base),
+            })
+        manifest = dm.write(out_dir, args.name, parents, added, carried,
+                            [str(f) for f in sources])
+        print(f"   dataset id {manifest['content_id']}")
         print(f"\nmerged dataset at {out_dir}")
         print(f"   {carried} frame(s) carried over from {len(bases)} base dataset(s), "
               f"keeping their original train/val side")
@@ -347,10 +361,13 @@ def main() -> int:
         ).decode().strip()
     except Exception:
         commit = "unknown"
+    dataset_manifest = dm.read(out_dir) or {}
     manifest = produced / "MANIFEST.json"
     manifest.write_text(json.dumps({
         "created": started.isoformat(timespec="seconds"),
         "dataset": str(out_dir),
+        "dataset_id": dataset_manifest.get("content_id"),
+        "dataset_name": dataset_manifest.get("name"),
         "source_folders": [str(f) for f in sources],
         "base_weights": args.base,
         "imgsz": imgsz,
