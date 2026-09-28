@@ -260,6 +260,18 @@ class PaprikaEngine:
         # its grooves, instead of refusing to answer at all.
         self._groove_axis_fallback = bool(policy.get("groove_axis_fallback", True))
         self._min_groove_coherence = float(policy.get("min_groove_coherence", 0.35))
+        # A third opinion on the AXIS, read from the fruit's own surface bands.
+        # Off by default: never measured against labelled fruit, and the last
+        # two mechanisms shipped on reasoning alone both caused false rejects.
+        #
+        # Scoped to the shape backend and, within it, to the colours where the
+        # stem cannot be found by hue - the same reasoning as
+        # uncertain_shape_colours. On red the stem IS found directly, so a
+        # groove disagreement there is not the failure this exists for.
+        self._groove_crosscheck = bool(policy.get("groove_crosscheck", False))
+        self._max_groove_disagreement_deg = float(
+            policy.get("max_groove_disagreement_deg", 30.0)
+        )
         # Maximum measured movement of the stem direction under a lighting
         # change before the fruit is sent round again instead of placed.
         self._max_stem_spread_deg = float(policy.get("max_stem_spread_deg", 6.0))
@@ -341,6 +353,16 @@ class PaprikaEngine:
         if (
             result.agreement_deg is not None
             and result.agreement_deg > self._max_estimator_disagreement_deg
+            and result.angle_deg is not None
+        ):
+            return PLACEMENT_REORIENT
+
+        # The same stop for the grooves. A confidence multiplier alone does not
+        # reliably reach a gate - 0.9 x 0.6 still clears min_angle_confidence -
+        # which is why groove_crosscheck() cuts confidence AND this exists.
+        if (
+            result.groove_agreement_deg is not None
+            and result.groove_agreement_deg > self._max_groove_disagreement_deg
             and result.angle_deg is not None
         ):
             return PLACEMENT_REORIENT
@@ -447,6 +469,52 @@ class PaprikaEngine:
             return None, [f"round_silhouette (elongation={result.elongation:.2f})"]
 
         return None, []
+
+    def _apply_groove_crosscheck(self, frame, bbox, result, colour: str):
+        """Check a settled axis against the fruit's own grooves.
+
+        Runs only where it can say something. Skipped for a result that came
+        FROM the grooves - comparing the groove axis to itself always agrees
+        and is a no-op self-endorsement, which is how two mechanisms that each
+        look sound combine into one that checks nothing.
+
+        Also skipped outside the configured colours. On red the stem is found
+        directly by hue and placed angles sit at a 2.1 degree median; a groove
+        disagreement there is not the failure this exists for, and every fruit
+        it downgraded would be one the machine had right.
+        """
+        if not self._groove_crosscheck or frame is None:
+            return result
+        # Shape backend only. This is a second opinion on an axis the classical
+        # stem search settled, and the colours it covers are the ones where
+        # that search has no hue to work with. The pose backend reaches its
+        # axis a different way and has its own failure modes; adding an
+        # unmeasured downgrade to it would be the third time a mechanism
+        # reasoned onto that path caused false rejects on the belt.
+        if self._backend != "shape":
+            return result
+        if result.source == "grooves":
+            return result
+        if colour and colour not in self._uncertain_shape_colours:
+            return result
+
+        mask = orient.segment_fruit(
+            frame, bbox, saturation_floor=self._saturation_floor,
+            belt_hue=self._belt_hue,
+        )
+        if mask is None:
+            return result
+        measured = end_on_model.groove_axis(
+            frame[bbox[1]:bbox[3], bbox[0]:bbox[2]], mask
+        )
+        if measured is None:
+            return result
+        axis, coherence = measured
+        return orient.groove_crosscheck(
+            result, axis, coherence,
+            min_coherence=self._min_groove_coherence,
+            max_disagreement_deg=self._max_groove_disagreement_deg,
+        )
 
     def _reconsider_standing(self, frame, bbox, result, stem):
         """Ask the silhouette whether a "lying" fruit is really standing.
@@ -800,6 +868,17 @@ class PaprikaEngine:
                     fused.notes.append("uncertain_stem_shape_crosscheck")
                     result = fused
                 placement = self._placement_for(result)
+
+        # Last, because everything above can REPLACE result outright - the
+        # uncertain-shape step swaps in a shape_orientation or a fused one, and
+        # a field written before that is simply gone. Running an earlier
+        # revision here set groove_agreement_deg on an object that was then
+        # thrown away, so the check ran, cost its milliseconds, and changed
+        # nothing.
+        result = self._apply_groove_crosscheck(
+            frame, bbox, result, str(detection.get("colour", ""))
+        )
+        placement = self._placement_for(result)
 
         # A fruit whose confidence collapsed still has a body lying on a belt,
         # and its grooves still run along its axis. Falling back to them turns
