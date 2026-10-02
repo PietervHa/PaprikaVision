@@ -6,6 +6,7 @@ Label the true stem position, so angle accuracy can be measured
     python -m tools.label_stems --score                   accuracy report
     python -m tools.label_stems --reset-blossom           redo the blossom pass
     python -m tools.label_stems --verify                  check labels before training
+    python -m tools.label_stems data/raw --fix-visibility  which end faces the camera
     python -m tools.label_stems data/raw --repair         fix old labels
 
 One click per fruit, on the base of the stem where it meets the body. The true
@@ -246,8 +247,18 @@ def _blossom_pass(frame, path, todo, labelled, args):
     return todo
 
 
-def draw_instructions(view: np.ndarray, caption: str, blossom: bool = False) -> np.ndarray:
+def draw_instructions(view: np.ndarray, caption: str, blossom: bool = False,
+                      standing: bool = False) -> np.ndarray:
     panel = view.copy()
+    if standing:
+        what = ("which end faces you?   c = CALYX (stem up)   "
+                "b = BLOSSOM (upside down)   l = not standing   s = skip   q = quit")
+        panel = view.copy()
+        for index, text in enumerate([caption, what]):
+            y = 26 + index * 26
+            cv2.putText(panel, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (0, 0, 0), 4)
+            cv2.putText(panel, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (255, 255, 255), 1)
+        return panel
     what = ("BLOSSOM SCAR:  left = visible   right = hidden, you know where   "
             "n = truly absent   s = skip   q = save+quit"
             if blossom else
@@ -477,6 +488,136 @@ def match(labelled: dict, detections: list[dict]) -> dict | None:
         if best_distance is None or distance < best_distance:
             best, best_distance = detection, distance
     return best
+
+
+def fix_visibility(args) -> int:
+    """Set the visibility flags on fruit whose landmarks sit together.
+
+    Standing fruit are the only ones where both landmarks land on the same
+    spot, and they are also the only ones where one landmark is ALWAYS hidden -
+    a fruit cannot show you both ends at once. So a standing fruit with both
+    landmarks flagged visible is wrong by construction, however carefully the
+    positions were clicked.
+
+    It matters twice over. The flag is what teaches the model to predict a
+    landmark it cannot see, which is the whole of ANNOTATION_SPEC section 3.
+    And at runtime stem_end's visibility is what separates "standing, stem up"
+    from "standing, stem down" - flag every one visible and every standing
+    fruit reads stem-up.
+
+    The positions are already right, so this asks one question per fruit:
+    which end is facing you? One keypress, no re-clicking.
+    """
+    cfg = load_config(args.config)
+    out_dir = Path(args.out).resolve()
+    labels_path = out_dir / "stem_labels.json"
+    labels = load_labels(labels_path)
+    if not labels:
+        print(f"No labels in {labels_path}")
+        return 1
+
+    source = Path(args.frames).resolve()
+    lookup: dict[str, Path] = {}
+    for candidate in sorted(source.rglob("*")):
+        if candidate.suffix.lower() in IMAGE_SUFFIXES:
+            lookup.setdefault(candidate.name, candidate)
+
+    # Candidates: landmarks closer together than a lying fruit could manage.
+    # keypoint_orientation calls standing below 0.18 of the box diagonal; a
+    # little above that catches the ones a human clicked as "both at the
+    # centre" without dragging in anything genuinely lying down.
+    threshold = float(args.standing_ratio)
+    todo = []
+    for name, entries in sorted(labels.items()):
+        if name not in lookup:
+            continue
+        for index, entry in enumerate(entries):
+            calyx, blossom = entry.get(CALYX_KEY), entry.get(BLOSSOM_KEY)
+            if not calyx or not blossom:
+                continue
+            x1, y1, x2, y2 = entry["bbox"]
+            diagonal = math.hypot(max(1, x2 - x1), max(1, y2 - y1))
+            gap = math.hypot(calyx[0] - blossom[0], calyx[1] - blossom[1]) / diagonal
+            if gap > threshold:
+                continue
+            if entry.get("stem_vis") == 1 or entry.get("blossom_vis") == 1:
+                continue                      # already answered
+            todo.append((name, index, gap))
+
+    if not todo:
+        print("No standing fruit with both landmarks flagged visible. Nothing to do.")
+        return 0
+
+    print(f"{len(todo)} standing fruit have both landmarks flagged visible.")
+    print("A standing fruit cannot show both ends - one is always underneath.\n")
+    print("   c = the CALYX faces you   (stem up)")
+    print("   b = the BLOSSOM faces you (stem down, upside down)")
+    print("   l = not standing after all, leave it alone")
+    print("   s = skip   q = save and quit\n")
+
+    try:
+        cv2.namedWindow("visibility", cv2.WINDOW_AUTOSIZE)
+    except cv2.error:
+        print("This needs a desktop OpenCV build - cv2.imshow is unavailable.")
+        return 1
+
+    fixed = 0
+    for name, index, gap in todo:
+        entry = labels[name][index]
+        frame = cv2.imread(str(lookup[name]))
+        if frame is None:
+            continue
+        x1, y1, x2, y2 = entry["bbox"]
+        pad_x, pad_y = int((x2 - x1) * CROP_MARGIN), int((y2 - y1) * CROP_MARGIN)
+        h, w = frame.shape[:2]
+        cx1, cy1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
+        cx2, cy2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
+        crop = frame[cy1:cy2, cx1:cx2]
+        if crop.size == 0:
+            continue
+        scale = VIEW_HEIGHT / crop.shape[0]
+        view = cv2.resize(crop, None, fx=scale, fy=scale)
+        point = entry[CALYX_KEY]
+        cv2.circle(view, (int((point[0] - cx1) * scale), int((point[1] - cy1) * scale)),
+                   12, (80, 220, 80), 2)
+
+        caption = f"{name}   {fixed} fixed   landmarks {gap:.2f} of the diagonal apart"
+        action = None
+        while action is None:
+            cv2.imshow("visibility", draw_instructions(view, caption, standing=True))
+            key = cv2.waitKey(20) & 0xFF
+            if key in (ord("q"), 27):
+                action = "quit"
+            elif key == ord("c"):
+                action = "calyx"
+            elif key == ord("b"):
+                action = "blossom"
+            elif key == ord("l"):
+                action = "lying"
+            elif key == ord("s"):
+                action = "skip"
+
+        if action == "quit":
+            break
+        if action == "calyx":
+            entry["stem_vis"], entry["blossom_vis"] = 2, 1
+            fixed += 1
+        elif action == "blossom":
+            entry["stem_vis"], entry["blossom_vis"] = 1, 2
+            fixed += 1
+        elif action == "lying":
+            entry["not_standing"] = True
+        save_labels(labels_path, labels)
+
+    cv2.destroyAllWindows()
+    save_labels(labels_path, labels)
+    occluded = sum(1 for v in labels.values() for e in v
+                   if e.get("stem_vis") == 1 or e.get("blossom_vis") == 1)
+    print(f"\n{fixed} fruit answered this session")
+    print(f"{occluded} fruit in the file now carry an occluded landmark")
+    print("\nRe-export to pick them up:")
+    print("   python -m tools.retrain --name v5 --base-dataset data/datasets/paprika_v4")
+    return 0
 
 
 def verify(args) -> int:
@@ -849,6 +990,13 @@ def main() -> int:
     parser.add_argument("--worst", type=int, default=10,
                         help="with --score, list this many worst PLACED fruit by "
                              "name so they can be looked at (0 = none)")
+    parser.add_argument("--fix-visibility", action="store_true",
+                        help="for standing fruit with both landmarks flagged "
+                             "visible: ask which end faces the camera and set "
+                             "the flags. Positions are not touched.")
+    parser.add_argument("--standing-ratio", type=float, default=0.25,
+                        help="landmarks closer than this fraction of the box "
+                             "diagonal count as standing (default 0.25)")
     parser.add_argument("--verify", action="store_true",
                         help="check the labels for systematic mistakes before "
                              "exporting or training")
@@ -861,6 +1009,8 @@ def main() -> int:
                              "frames; fixes labels taken with the buggy first "
                              "version without re-clicking anything")
     args = parser.parse_args()
+    if args.fix_visibility:
+        return fix_visibility(args)
     if args.verify:
         return verify(args)
     if args.reset_blossom:
