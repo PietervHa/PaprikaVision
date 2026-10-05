@@ -183,21 +183,57 @@ def export(args) -> int:
         (out_dir / split / "labels").mkdir(parents=True, exist_ok=True)
 
     written = collections_counter = {"train": 0, "val": 0}
-    fruit_total = both = calyx_only = neither = 0
+    fruit_total = both = calyx_only = neither = borrowed = 0
     skipped_no_label = 0
 
     # Several folders, deduplicated by filename. The labels are keyed by
     # filename, so two folders holding the same frame would otherwise export it
     # twice and could land the copies on opposite sides of the train/val split
     # - which is the near-duplicate leak the frame-level split exists to stop.
+    # Deduplicated by CONTENT, not by filename. tools/manual_capture writes the
+    # raw frame under a fresh timestamped name, so when the source is a folder
+    # of files rather than a live camera the same image ends up in data/raw and
+    # data/captures under two different names. Matching on name alone would
+    # export that fruit twice and could land the copies on opposite sides of
+    # the train/val split - the near-duplicate leak the frame-level split
+    # exists to prevent, and one that quietly inflates the validation score.
     seen: dict[str, Path] = {}
+    by_content: dict[str, Path] = {}
+    duplicates: list[tuple[Path, Path]] = []
+    # Other filenames the same image is known by. Labels are keyed by filename,
+    # so without this a fruit clicked under the capture's name would vanish the
+    # moment the exporter kept the raw file instead - the labelling silently
+    # doing nothing, which is worse than failing.
+    aliases: dict[str, list[str]] = {}
     for source in folders:
         for candidate in sorted(source.rglob("*")):
-            if candidate.suffix.lower() in IMAGE_SUFFIXES:
-                seen.setdefault(candidate.name, candidate)
+            if candidate.suffix.lower() not in IMAGE_SUFFIXES:
+                continue
+            if candidate.name in seen:
+                continue
+            image = cv2.imread(str(candidate))
+            if image is None:
+                continue
+            # Hash the decoded pixels, so the same frame saved as BMP and as
+            # PNG still matches. Encoding differs; the fruit does not.
+            digest = hashlib.sha1(image.tobytes()).hexdigest()
+            first = by_content.get(digest)
+            if first is not None:
+                duplicates.append((candidate, first))
+                aliases.setdefault(first.name, []).append(candidate.name)
+                continue
+            by_content[digest] = candidate
+            seen[candidate.name] = candidate
     frames = [seen[name] for name in sorted(seen)]
     for path in frames:
         entries = hand.get(path.name)
+        if not entries:
+            # Try the names this same image is also stored under.
+            for alias in aliases.get(path.name, []):
+                if hand.get(alias):
+                    entries = hand[alias]
+                    borrowed += 1
+                    break
         if not entries:
             skipped_no_label += 1
             continue
@@ -276,10 +312,22 @@ def export(args) -> int:
         encoding="utf-8",
     )
 
-    print(f"{len(frames)} frame(s) from "
+    print(f"{len(frames)} distinct frame(s) from "
           f"{', '.join(f.name for f in folders)} (unchanged)")
+    if duplicates:
+        print(f"{len(duplicates)} duplicate image(s) skipped - the same frame "
+              f"under two names.")
+        print("   This is what a capture of a file-based source looks like: the")
+        print("   tool copies the raw frame, so it appears in both folders.")
+        for dupe, first in duplicates[:3]:
+            print(f"      {dupe.name}  ==  {first.name}")
+        if len(duplicates) > 3:
+            print(f"      ... and {len(duplicates) - 3} more")
     if skipped_no_label:
         print(f"{skipped_no_label} had no hand labels and were skipped")
+    if borrowed:
+        print(f"{borrowed} frame(s) took their labels from a duplicate's "
+              f"filename - so clicks made on a capture still count.")
     print(f"\nwritten: {collections_counter['train']} train, "
           f"{collections_counter['val']} val frames")
     print(f"{fruit_total} fruit:")

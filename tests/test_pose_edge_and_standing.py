@@ -101,3 +101,30 @@ def test_a_genuinely_standing_fruit_is_still_reconsidered(monkeypatch):
     )
     assert out.pose in (orient.POSE_STANDING_STEM_UP, orient.POSE_STANDING_STEM_DOWN)
     assert out.angle_deg is None
+
+
+# ------------------------------------------------------------------- colour
+
+def test_the_pose_path_reports_a_colour():
+    """The pose model is trained on one class and has no concept of colour, so
+    without this every pose detection carried colour="". Not cosmetic: every
+    per-colour diagnostic reads this field, and with it empty a model failing
+    on one colour looks exactly like a model failing at random. Three rounds of
+    chasing a false "standing" verdict ended when the colours were checked by
+    hand and all three turned out to be yellow - 5 of 1287 training fruit.
+    """
+    import cv2
+    from backend.detection.paprika.pose_detector import PaprikaDetector
+
+    for bgr, expected in (((40, 40, 200), "red"),
+                          ((40, 200, 230), "yellow"),
+                          ((60, 170, 70), "green")):
+        frame = np.full((200, 200, 3), (190, 110, 45), np.uint8)   # belt
+        cv2.ellipse(frame, (100, 100), (60, 45), 20, 0, 360, bgr, -1)
+        assert PaprikaDetector._colour_in_box(frame, (30, 45, 170, 155)) == expected
+
+
+def test_an_empty_box_reports_no_colour_rather_than_guessing():
+    from backend.detection.paprika.pose_detector import PaprikaDetector
+    belt = np.full((200, 200, 3), (190, 110, 45), np.uint8)
+    assert PaprikaDetector._colour_in_box(belt, (10, 10, 60, 60)) == ""

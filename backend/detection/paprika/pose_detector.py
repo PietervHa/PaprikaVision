@@ -38,7 +38,9 @@ from backend.detection.paprika import classical
 from backend.detection.paprika import orientation as orient
 from backend.detection.paprika.orientation import Keypoint
 from backend.utils.logger import get_logger
-from backend.detection.paprika.classical import EDGE_MARGIN_PX, REASON_EDGE_CLIPPED
+from backend.detection.paprika.classical import (
+    EDGE_MARGIN_PX, REASON_EDGE_CLIPPED, colour_name,
+)
 from backend.utils.paths import project_path
 
 # Share of the bounding-box perimeter that may lie on the frame border before
@@ -301,6 +303,34 @@ class PaprikaDetector:
             on_border += box_w
         return on_border / float(2 * (box_w + box_h))
 
+    @staticmethod
+    def _colour_in_box(frame: np.ndarray, bbox) -> str:
+        """The fruit's colour, read straight from the pixels in its box.
+
+        The pose model has no concept of colour - it is trained on one class -
+        so without this every pose detection carried colour="". That is not
+        cosmetic: every per-colour diagnostic reads this field, and with it
+        empty a model failing on one colour and fine on the others looks
+        exactly like a model failing at random. Three rounds of chasing a
+        false "standing" verdict ended the moment the colours were checked by
+        hand and all three turned out to be yellow.
+
+        Median hue over the saturated, non-belt pixels in the box, through the
+        same colour_name() thresholds the classical path uses, so both
+        backends name colours identically.
+        """
+        x1, y1, x2, y2 = bbox
+        crop = frame[max(0, y1):y2, max(0, x1):x2]
+        if crop.size == 0:
+            return ""
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        hue, saturation, value = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+        # Saturated, bright, and not the belt - the fruit is what is left.
+        fruit = (saturation > 80) & (value > 60) & ~((hue >= 96) & (hue <= 145))
+        if int(fruit.sum()) < 100:
+            return ""
+        return colour_name(float(np.median(hue[fruit])))
+
     def _detect_pose(self, frame: np.ndarray) -> list[dict]:
         with self._model_lock:
             model = self._load_model()
@@ -380,6 +410,7 @@ class PaprikaDetector:
                             REASON_EDGE_CLIPPED if clipped else ""
                         ),
                         "edge_clipped": clipped,
+                        "colour": self._colour_in_box(frame, (x1, y1, x2, y2)),
                         "confidence": round(float(box_conf[i]), 3) if i < len(box_conf) else 0.0,
                         "keypoints": landmarks,
                         "area_px": max(0, (x2 - x1) * (y2 - y1)),

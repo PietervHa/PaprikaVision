@@ -130,7 +130,7 @@ paprika:
   # end_on_conf_max to consult the silhouette on more fruit, lower them to
   # consult it on fewer.
   end_on_overrides_lying: true
-  end_on_span_ratio_max: 0.45
+  end_on_span_ratio_max: 0.22
   end_on_conf_max: 0.55
 
   shape:
