@@ -127,19 +127,27 @@ def folders_holding_labelled_frames(labels_path: Path, root: Path) -> list[Path]
 def merge_datasets(bases, staged, out_dir):
     """Build one dataset from existing ones plus newly exported frames.
 
-    A frame already present in a base keeps the split it had. Version-to-
-    version comparisons are only meaningful if the val set stays the val set -
-    a frame that crosses from train to val looks like an improvement and is
-    not one.
+    Where a frame appears in both, the FRESHLY EXPORTED label wins. It comes
+    from stem_labels.json as it stands today, so a click corrected since the
+    base was built actually reaches the new dataset. The base copy winning was
+    a quiet trap: re-labelling an old frame - fixing a stray click, or running
+    --fix-visibility over standing fruit - appeared to work, saved correctly,
+    and was then silently discarded at export because an older copy of that
+    frame already existed.
+
+    The train/val SIDE still comes from the base. Frames are assigned by a hash
+    of the filename, so a re-export lands on the same side anyway, but taking
+    it from the base makes that a guarantee rather than a coincidence: a frame
+    crossing from train to val between versions looks like an improvement and
+    is not one.
     """
     for split in ("train", "val"):
         (out_dir / split / "images").mkdir(parents=True, exist_ok=True)
         (out_dir / split / "labels").mkdir(parents=True, exist_ok=True)
 
-    taken: set[str] = set()
-    carried = added = 0
-    for source, is_base in [(b, True) for b in bases] + (
-            [(staged, False)] if staged is not None else []):
+    def contents(source):
+        """{stem: (split, image, label)} for one dataset."""
+        found = {}
         for split in ("train", "val"):
             images = source / split / "images"
             if not images.exists():
@@ -147,18 +155,34 @@ def merge_datasets(bases, staged, out_dir):
             for image in sorted(images.iterdir()):
                 if image.suffix.lower() not in IMAGE_SUFFIXES:
                     continue
-                if image.stem in taken:
-                    continue
                 label = source / split / "labels" / f"{image.stem}.txt"
-                if not label.exists():
-                    continue
-                shutil.copy2(image, out_dir / split / "images" / image.name)
-                shutil.copy2(label, out_dir / split / "labels" / label.name)
-                taken.add(image.stem)
-                if is_base:
-                    carried += 1
-                else:
-                    added += 1
+                if label.exists():
+                    found[image.stem] = (split, image, label)
+        return found
+
+    from_base = {}
+    for base in bases:
+        for stem, entry in contents(base).items():
+            from_base.setdefault(stem, entry)
+    from_new = contents(staged) if staged is not None else {}
+
+    carried = added = refreshed = 0
+    for stem in sorted(set(from_base) | set(from_new)):
+        base_entry = from_base.get(stem)
+        new_entry = from_new.get(stem)
+        if new_entry is not None:
+            # Side from the base where there is one; the label is the new one.
+            split = base_entry[0] if base_entry is not None else new_entry[0]
+            _, image, label = new_entry
+            if base_entry is not None:
+                refreshed += 1
+            else:
+                added += 1
+        else:
+            split, image, label = base_entry
+            carried += 1
+        shutil.copy2(image, out_dir / split / "images" / image.name)
+        shutil.copy2(label, out_dir / split / "labels" / label.name)
 
     reference = (staged if staged is not None else bases[0]) / "data.yaml"
     target = out_dir / "data.yaml"
@@ -167,8 +191,7 @@ def merge_datasets(bases, staged, out_dir):
         lines = [f"path: {out_dir.as_posix()}" if l.startswith("path:") else l
                  for l in text.splitlines()]
         target.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return carried, added
-
+    return carried, added, refreshed
 
 def newest_run(runs_root: Path, after: float) -> Path | None:
     """The training run created by this invocation, not whichever is newest.
@@ -278,7 +301,9 @@ def main() -> int:
             return 1
 
     if not args.dry_run:
-        carried, added = merge_datasets(bases, staged if sources else None, out_dir)
+        carried, added, refreshed = merge_datasets(
+            bases, staged if sources else None, out_dir
+        )
         # Parents recorded by content id as well as path: folders get moved and
         # renamed, and what was actually trained on does not change when they do.
         parents = []
@@ -296,6 +321,11 @@ def main() -> int:
         print(f"   {carried} frame(s) carried over from {len(bases)} base dataset(s), "
               f"keeping their original train/val side")
         print(f"   {added} newly labelled frame(s) added")
+        if refreshed:
+            print(f"   {refreshed} frame(s) took their CURRENT labels instead of "
+                  f"the base's copy")
+            print(f"      (re-labelled since that dataset was built - a corrected "
+                  f"click, or --fix-visibility)")
         if staged.exists():
             shutil.rmtree(staged, ignore_errors=True)
     else:
