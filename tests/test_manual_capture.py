@@ -118,7 +118,17 @@ def test_it_never_raises_from_the_key_handler(tmp_path):
 
 
 def test_an_unwritable_directory_disables_cleanly(tmp_path):
-    capture = _capture(tmp_path / "x", None, directory="/proc/nope/x")
+    """A directory that cannot be created must switch capture off, not raise.
+
+    Made unwritable by putting a FILE where a parent directory would have to
+    be, which fails on every platform. An earlier version used "/proc/nope/x":
+    unwritable on Linux, and on Windows an ordinary path under C:\\ that mkdir
+    creates without complaint - so the test passed on the machine it was
+    written on and failed on the machine the software actually runs on.
+    """
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    capture = _capture(tmp_path, None, directory=str(blocker / "captures"))
     assert capture.start() is False
     assert capture.enabled is False
 
