@@ -124,6 +124,11 @@ def write(dataset: Path, name: str, parents: list[dict], added: int,
     return manifest
 
 
+def unverifiable(dataset: Path) -> bool:
+    """No manifest, so nothing to check against."""
+    return read(dataset) is None
+
+
 def read(dataset: Path) -> dict | None:
     path = dataset / MANIFEST_NAME
     if not path.exists():
@@ -135,10 +140,20 @@ def read(dataset: Path) -> dict | None:
 
 
 def verify(dataset: Path) -> tuple[bool, str]:
-    """Has anything changed since the manifest was written?"""
+    """Has anything changed since the manifest was written?
+
+    Three outcomes, not two. A dataset with no manifest is UNVERIFIABLE, which
+    is not the same as altered: it was built before manifests existed and may
+    be perfectly good. Reporting both as failures trains people to ignore the
+    failures, and the one that matters - labels changed under a model that was
+    trained on them - is the one that then gets missed.
+
+    Returns (ok, message). `ok` is False only for a dataset that demonstrably
+    does not match what it recorded; see unverifiable() for the other case.
+    """
     manifest = read(dataset)
     if manifest is None:
-        return False, "no manifest - built before these were written, or edited by hand"
+        return True, "unverifiable - predates manifests, or was built by hand"
     recorded = manifest.get("content_id")
     actual = content_id(dataset)
     if recorded != actual:

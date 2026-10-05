@@ -40,7 +40,7 @@ def datasets_under(root: Path) -> list[Path]:
 def summarise(dataset: Path) -> None:
     manifest = dm.read(dataset)
     ok, message = dm.verify(dataset)
-    mark = "ok " if ok else "!! "
+    mark = "?  " if dm.unverifiable(dataset) else ("ok " if ok else "!! ")
     if manifest is None:
         counts = dm.counts(dataset)
         total = sum(c["fruit"] for c in counts.values())
@@ -154,13 +154,22 @@ def main() -> int:
 
     if args.verify:
         bad = [d for d in found if not dm.verify(d)[0]]
+        unknown = [d for d in found if dm.unverifiable(d)]
         print()
+        if unknown:
+            print(f"{len(unknown)} dataset(s) cannot be checked - no manifest. "
+                  f"Built before these existed;")
+            print("   not evidence of a problem. Rebuild with retrain if you "
+                  "need them verifiable.")
+            for dataset in unknown:
+                print(f"   ?  {dataset.name}")
         if bad:
-            print(f"{len(bad)} dataset(s) do not match their manifest:")
+            print(f"\n{len(bad)} dataset(s) DO NOT match their manifest - "
+                  f"the labels changed since it was written:")
             for dataset in bad:
-                print(f"   {dataset.name}: {dm.verify(dataset)[1]}")
+                print(f"   !! {dataset.name}: {dm.verify(dataset)[1]}")
             return 1
-        print("all datasets intact")
+        print(f"\n{len(found) - len(unknown)} dataset(s) verified intact")
     return 0
 
 
