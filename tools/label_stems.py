@@ -180,11 +180,22 @@ class _Clicker:
     def __init__(self) -> None:
         self.point: tuple[int, int] | None = None
         self.visibility: int = 2
+        # The canvas is larger than the crop - an instruction band below it,
+        # and padding to the right when the text is wider than the fruit. A
+        # click there is not a landmark, and recording one would place it
+        # outside the fruit it belongs to.
+        self.limit: tuple[int, int] | None = None
+
+    def _inside(self, x: int, y: int) -> bool:
+        if self.limit is None:
+            return True
+        width, height = self.limit
+        return 0 <= x < width and 0 <= y < height
 
     def __call__(self, event, x, y, flags, param) -> None:
-        if event == cv2.EVENT_LBUTTONDOWN:
+        if event == cv2.EVENT_LBUTTONDOWN and self._inside(x, y):
             self.point, self.visibility = (x, y), 2
-        elif event == cv2.EVENT_RBUTTONDOWN:
+        elif event == cv2.EVENT_RBUTTONDOWN and self._inside(x, y):
             self.point, self.visibility = (x, y), 1
 
 
@@ -221,6 +232,7 @@ def _blossom_pass(frame, path, todo, labelled, args):
 
         caption = (f"{path.name}   blossom {index + 1}/{len(todo)}   "
                    f"[{labelled} done]   green ring = calyx you marked")
+        _CLICKER.limit = (view.shape[1], view.shape[0])
         _CLICKER.point = None
         action = None
         while action is None:
@@ -249,28 +261,58 @@ def _blossom_pass(frame, path, todo, labelled, args):
 
 def draw_instructions(view: np.ndarray, caption: str, blossom: bool = False,
                       standing: bool = False) -> np.ndarray:
-    panel = view.copy()
-    if standing:
-        what = ("which end faces you?   c = CALYX (stem up)   "
-                "b = BLOSSOM (upside down)   l = not standing   s = skip   q = quit")
-        panel = view.copy()
-        for index, text in enumerate([caption, what]):
-            y = 26 + index * 26
-            cv2.putText(panel, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (0, 0, 0), 4)
-            cv2.putText(panel, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (255, 255, 255), 1)
-        return panel
-    what = ("BLOSSOM SCAR:  left = visible   right = hidden, you know where   "
-            "n = truly absent   s = skip   q = save+quit"
-            if blossom else
-            "STEM BASE (calyx):  left = visible   right = hidden, you know where   "
-            "n = no stem   s = skip   u = undo   q = save+quit")
-    lines = [caption, what]
-    for index, text in enumerate(lines):
-        y = 26 + index * 26
-        cv2.putText(panel, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 0, 0), 4)
-        cv2.putText(panel, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 1)
-    return panel
+    """The crop with its instructions, on a canvas wide enough to hold them.
 
+    The text goes in a band BELOW the image, never over it, and the image stays
+    at (0, 0). Both of those are deliberate.
+
+    Drawn over the image, a long line ran off the edge of a narrow crop - a
+    tall fruit gives a narrow view at a fixed display height - so the controls
+    were unreadable on exactly the fruit that needed the most care.
+
+    Below rather than above, because a header would shift the image down and
+    every click would then need the band height subtracting back out. That is
+    one arithmetic slip away from labels that are all wrong by a constant,
+    which this project has already done once with a doubled bbox offset and did
+    not notice for 470 clicks. With the image at the origin the existing
+    mapping is untouched, and _Clicker ignores anything outside it.
+    """
+    if standing:
+        lines = [caption,
+                 "which end faces you?",
+                 "c = CALYX (stem up)      b = BLOSSOM (upside down)",
+                 "l = not standing     s = skip     q = save+quit"]
+    elif blossom:
+        lines = [caption,
+                 "click the BLOSSOM SCAR - the opposite end",
+                 "left = visible      right = hidden, you know where",
+                 "n = truly absent     s = skip     q = save+quit"]
+    else:
+        lines = [caption,
+                 "click the STEM BASE (calyx) - NOT the stem tip",
+                 "left = visible      right = hidden, you know where",
+                 "n = no stem     s = skip     u = undo     q = save+quit"]
+
+    scale, thickness = 0.58, 1
+    sizes = [cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)[0]
+             for line in lines]
+    text_width = max(w for w, _ in sizes) + 24
+    line_height = max(h for _, h in sizes) + 12
+
+    height, width = view.shape[:2]
+    canvas_width = max(width, text_width)
+    band = line_height * len(lines) + 14
+    canvas = np.zeros((height + band, canvas_width, 3), np.uint8)
+    canvas[:height, :width] = view
+
+    for index, line in enumerate(lines):
+        y = height + 10 + line_height * (index + 1) - 6
+        colour = (255, 255, 255) if index == 0 else (170, 230, 170)
+        cv2.putText(canvas, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    scale, (0, 0, 0), 3)
+        cv2.putText(canvas, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    scale, colour, thickness)
+    return canvas
 
 def label(args) -> int:
     cfg = load_config(args.config)
@@ -391,6 +433,7 @@ def label(args) -> int:
 
             caption = (f"{path.name}   fruit {index + 1}/{len(fruit)}   "
                        f"{item.colour}   [{labelled} labelled]")
+            clicker.limit = (view.shape[1], view.shape[0])
             clicker.point = None
             action = None
             while action is None:
