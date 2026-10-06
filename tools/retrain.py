@@ -6,6 +6,7 @@ Retrain the pose model in one command, with provenance
     python -m tools.retrain --name v4 --base-dataset data/datasets/paprika_v3 \
                             --base models/paprika_pose.pt
     python -m tools.retrain --name v4 --dry-run
+    python -m tools.retrain --record runs/pose/train8
 
 Runs export, dataset check, training and scoring as one sequence, and writes
 down what produced what. Every step is a tool that already exists; this removes
@@ -193,6 +194,85 @@ def merge_datasets(bases, staged, out_dir):
         target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return carried, added, refreshed
 
+def record_run(run_dir: Path, root: Path) -> int:
+    """Write the provenance for a run trained outside this script.
+
+    A bare `yolo pose train`, or a `resume` after an interrupted run, never
+    reaches the provenance step here - so the weights end up with no record of
+    what produced them, and worse, with the PREVIOUS model's manifest still
+    sitting beside them in models/. A confidently wrong lineage is worse than
+    none: --trace reports it without hesitating.
+
+    Everything needed is already in the run's own args.yaml, which ultralytics
+    writes at the start of training: the dataset, the starting weights, the
+    image size, every hyper-parameter. This reads it back.
+    """
+    import yaml
+
+    args_path = run_dir / "args.yaml"
+    weights = run_dir / "weights" / "best.pt"
+    if not args_path.exists():
+        print(f"No args.yaml in {run_dir} - is that a training run directory?")
+        return 1
+    if not weights.exists():
+        print(f"No weights/best.pt in {run_dir}")
+        return 1
+
+    args = yaml.safe_load(args_path.read_text(encoding="utf-8")) or {}
+    data_yaml = Path(str(args.get("data", "")))
+    dataset = data_yaml.parent if data_yaml.name == "data.yaml" else None
+    dataset_manifest = dm.read(dataset) if dataset and dataset.exists() else None
+
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=str(root)
+        ).decode().strip()
+    except Exception:
+        commit = "unknown"
+
+    record = {
+        "created": datetime.fromtimestamp(
+            weights.stat().st_mtime
+        ).isoformat(timespec="seconds"),
+        "dataset": str(dataset) if dataset else None,
+        "dataset_id": (dataset_manifest or {}).get("content_id"),
+        "dataset_name": (dataset_manifest or {}).get("name"),
+        "base_weights": str(args.get("model", "")),
+        "imgsz": args.get("imgsz"),
+        "epochs": args.get("epochs"),
+        "patience": args.get("patience"),
+        "batch": args.get("batch"),
+        "git_commit": commit,
+        "replaced": None,
+        "recorded_after_the_fact": True,
+        "resumed": bool(args.get("resume")),
+    }
+    manifest = run_dir / "MANIFEST.json"
+    manifest.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    print(f"wrote {manifest}")
+
+    if dataset is None or not dataset.exists():
+        print(f"\n!! The dataset this trained on is not where args.yaml says:")
+        print(f"   {data_yaml}")
+        print("   The manifest records the path but cannot verify the contents.")
+    elif dataset_manifest is None:
+        print(f"\n!! {dataset.name} has no DATASET.json, so this model's lineage")
+        print("   stops there. Nothing is wrong; it just cannot be verified.")
+    else:
+        ok, message = dm.verify(dataset)
+        print(f"   trained on {dataset.name}  [{message}]")
+
+    live = project_path("models/paprika_pose.pt")
+    if live.exists():
+        print(f"\nIf {weights.name} is the model now installed, copy the record "
+              f"beside it:")
+        print(f"   copy \"{manifest}\" models\\paprika_pose.json")
+        print("Otherwise DELETE models\\paprika_pose.json - a stale manifest "
+              "makes --trace")
+        print("report the wrong lineage with no sign that it is wrong.")
+    return 0
+
+
 def newest_run(runs_root: Path, after: float) -> Path | None:
     """The training run created by this invocation, not whichever is newest.
 
@@ -217,7 +297,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Export, check, train and score the pose model as one step."
     )
-    parser.add_argument("--name", required=True,
+    parser.add_argument("--record", metavar="RUN_DIR", default=None,
+                        help="write provenance for a run trained outside this "
+                             "script - a bare 'yolo pose train', or a resume. "
+                             "Reads the run's own args.yaml.")
+    parser.add_argument("--name", required=False,
                         help="dataset version name, e.g. v3. Must not already exist.")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--patience", type=int, default=10)
@@ -245,6 +329,10 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_path(".")
+    if args.record:
+        return record_run(Path(args.record).resolve(), root)
+    if not args.name:
+        parser.error("--name is required unless --record is used")
     started = datetime.now()
     out_dir = project_path("data/datasets") / f"paprika_{args.name}"
     if out_dir.exists() and not args.dry_run:

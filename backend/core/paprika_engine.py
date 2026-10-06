@@ -830,9 +830,24 @@ class PaprikaEngine:
         # estimator here instead asks it to settle exactly what fuse() already
         # knows how to settle - the flip - using the same arbitration
         # shape_crosscheck performs, without another dial on the stem search.
+        #
+        # Shape backend only, and the reasoning above says why: every clause of
+        # it is about the CLASSICAL stem search - hue finding the stem directly
+        # on red, morphology plus a brightness self-check carrying green. The
+        # pose model has neither.
+        #
+        # This guard is here because the path switched itself on by accident.
+        # Pose detections used to report colour="" so the colour test never
+        # passed and the branch was dormant; giving them a real colour - a fix
+        # for a different problem entirely - enabled it. On the first run
+        # afterwards it answered 6 of 181 placed fruit and produced the whole
+        # tail: 93, 68, 54 and 37 degrees out, against a keypoint p90 of 10.8.
+        # A dormant path waking up because an unrelated field got populated is
+        # not something the next person should have to rediscover.
         if (
             placement != PLACEMENT_PLACE
             and self._uncertain_shape_crosscheck
+            and self._backend == "shape"
             and not use_shape
             and frame is not None
             and detection.get("colour", "").strip().lower() in self._uncertain_shape_colours

@@ -103,28 +103,56 @@ def test_a_genuinely_standing_fruit_is_still_reconsidered(monkeypatch):
     assert out.angle_deg is None
 
 
-# ------------------------------------------------------------------- colour
+def test_the_uncertain_shape_crosscheck_does_not_fire_on_pose():
+    """A dormant path that woke up because an unrelated field got populated.
 
-def test_the_pose_path_reports_a_colour():
-    """The pose model is trained on one class and has no concept of colour, so
-    without this every pose detection carried colour="". Not cosmetic: every
-    per-colour diagnostic reads this field, and with it empty a model failing
-    on one colour looks exactly like a model failing at random. Three rounds of
-    chasing a false "standing" verdict ended when the colours were checked by
-    hand and all three turned out to be yellow - 5 of 1287 training fruit.
+    uncertain_shape_crosscheck is entirely about the CLASSICAL stem search -
+    hue finding the stem on red, morphology plus a brightness self-check
+    carrying green. The pose model has neither.
+
+    It was gated on the fruit's colour, and pose detections used to report
+    colour="" so it never fired. Giving them a real colour - a fix for a
+    different problem - switched it on, and it answered 6 of 181 placed fruit
+    with the whole tail: 93, 68, 54 and 37 degrees out, against a keypoint p90
+    of 10.8.
     """
+    import copy
     import cv2
-    from backend.detection.paprika.pose_detector import PaprikaDetector
+    from backend.core.paprika_engine import PaprikaEngine
+    from backend.detection.paprika import orientation as orient
+    from backend.detection.paprika.orientation import Keypoint, Orientation
 
-    for bgr, expected in (((40, 40, 200), "red"),
-                          ((40, 200, 230), "yellow"),
-                          ((60, 170, 70), "green")):
-        frame = np.full((200, 200, 3), (190, 110, 45), np.uint8)   # belt
-        cv2.ellipse(frame, (100, 100), (60, 45), 20, 0, 360, bgr, -1)
-        assert PaprikaDetector._colour_in_box(frame, (30, 45, 170, 155)) == expected
+    block = {
+        "shape": {"saturation_floor": 80, "belt_hue": [96, 145], "value_floor": 45,
+                  "min_area_px": 3000, "max_area_ratio": 0.7},
+        "policy": {"min_angle_confidence": 0.45, "min_flip_confidence": 0.40,
+                   "uncertain_shape_crosscheck": True,
+                   "uncertain_shape_colours": ["green"]},
+        "frame": {"angle_offset_deg": 0.0, "angle_invert": False},
+    }
+    detection = {
+        "bbox": (40, 40, 260, 240), "center": (150.0, 140.0), "confidence": 0.9,
+        "colour": "green", "stem_method": "pose",
+        "keypoints": {
+            "stem_end": Keypoint(x=200.0, y=100.0, confidence=0.30, visible=True),
+            "blossom_end": Keypoint(x=100.0, y=180.0, confidence=0.30, visible=True),
+        },
+    }
+    frame = np.full((320, 320, 3), (190, 110, 45), np.uint8)
+    cv2.ellipse(frame, (150, 140), (105, 95), 20, 0, 360, (55, 165, 70), -1)
 
+    original = orient.shape_orientation
+    orient.shape_orientation = lambda *a, **k: Orientation(
+        source="shape", pose=orient.POSE_LYING, angle_deg=95.0, axis_deg=95.0,
+        confidence=0.9, flip_confidence=0.9)
+    try:
+        results = {}
+        for backend in ("pose", "shape"):
+            engine = PaprikaEngine({"paprika": {**block, "backend": backend}})
+            out = engine._evaluate_one(frame, copy.deepcopy(detection))
+            results[backend] = out["orientation"].get("source")
+    finally:
+        orient.shape_orientation = original
 
-def test_an_empty_box_reports_no_colour_rather_than_guessing():
-    from backend.detection.paprika.pose_detector import PaprikaDetector
-    belt = np.full((200, 200, 3), (190, 110, 45), np.uint8)
-    assert PaprikaDetector._colour_in_box(belt, (10, 10, 60, 60)) == ""
+    assert results["pose"] == "keypoints", "the silhouette must not answer for pose"
+    assert results["shape"] == "fused", "but it must still help the shape backend"
