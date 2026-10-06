@@ -1,20 +1,15 @@
 {
-  "created": "2026-10-02T09:21:49",
-  "dataset": "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\data\\datasets\\paprika_v5",
-  "dataset_id": "1e7ce75ddcb6",
-  "dataset_name": "v5",
-  "source_folders": [
-    "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\data\\raw",
-    "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\data\\Paprika_testdata_1",
-    "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\data\\captures",
-    "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\data\\temp",
-    "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\data\\testdata"
-  ],
-  "base_weights": "yolo11n-pose.pt",
+  "created": "2026-10-06T10:14:38",
+  "dataset": "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\data\\datasets\\paprika_v6",
+  "dataset_id": "a7e08c1e6d06",
+  "dataset_name": "v6",
+  "base_weights": "runs\\pose\\train8\\weights\\last.pt",
   "imgsz": 640,
   "epochs": 100,
   "patience": 10,
   "batch": 16,
-  "git_commit": "e87107a",
-  "replaced": "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\models\\paprika_pose_before_v5_20261002_092149.pt"
+  "git_commit": "8b5ad39",
+  "replaced": null,
+  "recorded_after_the_fact": true,
+  "resumed": true
 }
