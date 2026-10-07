@@ -311,8 +311,19 @@ def main() -> int:
                              "trained at the size it will be run at")
     parser.add_argument("--base", default="yolo11n-pose.pt",
                         help="weights to start from. The default trains fresh; "
-                             "point at models/paprika_pose.pt to fine-tune, "
-                             "which risks forgetting on a small dataset.")
+                             "models/paprika_pose.pt warm-starts from the "
+                             "model in service, which converges in far fewer "
+                             "epochs when the dataset is mostly unchanged.")
+    parser.add_argument("--freeze", type=int, default=None, metavar="N",
+                        help="freeze the first N layers. 10 freezes the "
+                             "backbone, leaving the head to adapt: about 35%% "
+                             "less work per epoch. Sensible with a warm start "
+                             "on a dataset that has only grown; wrong for a "
+                             "fresh model, which needs the backbone to learn.")
+    parser.add_argument("--lr0", type=float, default=None,
+                        help="initial learning rate. Leave unset for auto. "
+                             "0.0005 or so when warm-starting, so the model "
+                             "adjusts rather than overwrites.")
     parser.add_argument("--base-dataset", action="append", default=[],
                         metavar="PATH",
                         help="an existing exported dataset to build on. "
@@ -438,7 +449,27 @@ def main() -> int:
              f"data={(out_dir / 'data.yaml').as_posix()}",
              f"model={args.base}", f"imgsz={imgsz}", f"epochs={args.epochs}",
              f"patience={args.patience}", f"batch={args.batch}",
+             # amp=False because compute capability 5.0 has no fast FP16 -
+             # measured, mixed precision buys nothing on this card. workers=4
+             # rather than 8 because the machine runs near its RAM limit and
+             # each worker is a separate process.
              "amp=False", "workers=4"]
+    if args.freeze is not None:
+        train.append(f"freeze={args.freeze}")
+    if args.lr0 is not None:
+        train.append(f"lr0={args.lr0}")
+
+    warm = args.base != "yolo11n-pose.pt"
+    if args.freeze is not None and not warm:
+        print("\n!! freeze on a FRESH model stops the backbone learning your")
+        print("   fruit at all - it keeps whatever COCO taught it. Freezing is")
+        print("   for a warm start, where the backbone is already right.")
+    if warm and args.lr0 is None:
+        print("\n   warm-starting from existing weights at the automatic "
+              "learning rate.")
+        print("   --lr0 0.0005 makes it adjust rather than overwrite, which "
+              "is usually")
+        print("   what you want when the dataset has only grown.")
     if run(train, args.dry_run, root) != 0:
         print("training failed")
         return 1
