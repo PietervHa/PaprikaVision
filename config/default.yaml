@@ -504,7 +504,7 @@ camera:
   source: "folder"
 
   folder:
-    path: "data/testdata"       # .bmp/.jpg/.png, read recursively
+    path: "data/CleanImages_20261008"       # .bmp/.jpg/.png, read recursively
     interval_s: 2.0        # seconds per image
     loop: true             # start over at the end
     # hold: true stays on one image until you click on in the HMI. Needed when
