@@ -584,7 +584,12 @@ def fix_visibility(args) -> int:
             if gap > threshold:
                 continue
             if entry.get("stem_vis") == 1 or entry.get("blossom_vis") == 1:
-                continue                      # already answered
+                continue                      # answered: one end is hidden
+            if entry.get("not_standing"):
+                # Answered with "l": looked, and it is lying after all. Without
+                # this the judgement was written down and then ignored, so the
+                # same fruit came back every run and the pass never finished.
+                continue
             todo.append((name, index, gap))
 
     if not todo:
@@ -658,8 +663,8 @@ def fix_visibility(args) -> int:
                    if e.get("stem_vis") == 1 or e.get("blossom_vis") == 1)
     print(f"\n{fixed} fruit answered this session")
     print(f"{occluded} fruit in the file now carry an occluded landmark")
-    print("\nRe-export to pick them up:")
-    print("   python -m tools.retrain --name v5 --base-dataset data/datasets/paprika_v4")
+    print("\nRe-export to pick them up with your next version, e.g.:")
+    print("   python -m tools.retrain --name vN --base-dataset data/datasets/paprika_<latest>")
     return 0
 
 
