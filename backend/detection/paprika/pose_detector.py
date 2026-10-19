@@ -93,6 +93,7 @@ class PaprikaDetector:
         self._model_path = str(project_path(pose_cfg.get("model_path"), "models/paprika_pose.pt"))
         self._imgsz = int(pose_cfg.get("imgsz", 640))
         self._kp_confidence = float(pose_cfg.get("keypoint_confidence", 0.30))
+        self._cudnn_benchmark = bool(pose_cfg.get("cudnn_benchmark", True))
 
         self._model = None
         self._model_lock = threading.Lock()
@@ -117,38 +118,74 @@ class PaprikaDetector:
             return None
 
         try:
+            self._set_cudnn_benchmark()
             from ultralytics import YOLO
 
             self._model = YOLO(self._model_path)
             log.info("Paprika pose model loaded: %s", self._model_path)
-            self._warm_up(self._model)
             return self._model
         except Exception as exc:
             log.error("Failed to load paprika pose model '%s': %s", self._model_path, exc)
             self._model_failed = True
             return None
 
-    def _warm_up(self, model) -> None:
+    def _set_cudnn_benchmark(self) -> None:
+        """Let cuDNN time its algorithms per input shape instead of guessing.
+
+        Off, its heuristics pick slow kernels for some shapes on the Quadro
+        M1200: 99 ms at imgsz 512 against 59 ms with this on (see
+        paprika.pose.cudnn_benchmark). The flag is process-wide, not per
+        model, and has no effect without CUDA. Set before the first predict,
+        since tuning happens on the first call for each shape.
+        """
+        try:
+            import torch
+
+            torch.backends.cudnn.benchmark = self._cudnn_benchmark
+            log.info("cuDNN benchmark mode: %s", "on" if self._cudnn_benchmark else "off")
+        except Exception as exc:
+            log.warning("Could not set cuDNN benchmark mode: %s", exc)
+
+    def warm_up(self, frame_shape) -> None:
+        """Load the model and warm it up for frames of `frame_shape` (h, w, ...).
+
+        Takes the real frame shape because benchmark mode tunes per input
+        tensor shape, and predict letterboxes a 900x1092 frame at imgsz 416 to
+        352x416 - a square imgsz x imgsz blank would tune a shape the line
+        never sends, and the first triggered cycle would pay the tuning.
+        No-op on the backends with no model.
+        """
+        if self.backend != "pose":
+            return
+        with self._model_lock:
+            model = self._load_model()
+            if model is not None:
+                self._warm_up(model, frame_shape)
+
+    def _warm_up(self, model, frame_shape) -> None:
         """Run one throwaway inference so the first real frame is not the slow one.
 
         A cold CUDA model compiles kernels, allocates workspace and initialises
-        cuDNN on its first call - seconds, not milliseconds. Without this that
-        cost lands on whichever fruit happens to arrive first after a restart,
-        which on a trigger-driven line means a missed piece rather than a slow
-        one. Doing it at load moves the cost to somewhere nobody is waiting.
+        cuDNN on its first call - seconds, not milliseconds - and with
+        benchmark mode on it also times algorithms for the input shape. Without
+        this that cost lands on whichever fruit happens to arrive first after a
+        restart, which on a trigger-driven line means a missed piece rather
+        than a slow one. Doing it at startup moves the cost to somewhere nobody
+        is waiting.
 
         Deliberately forgiving: a warm-up that fails has not broken anything
         the next real call will not also hit and report properly, and refusing
         to start over a throwaway inference would be worse than a slow frame.
         """
         try:
-            blank = np.zeros((self._imgsz, self._imgsz, 3), dtype=np.uint8)
+            height, width = int(frame_shape[0]), int(frame_shape[1])
+            blank = np.zeros((height, width, 3), dtype=np.uint8)
             start = time.perf_counter()
             model.predict(blank, imgsz=self._imgsz, conf=self.confidence,
                           verbose=False)
             log.info(
-                "Paprika pose model warmed up in %.0f ms",
-                (time.perf_counter() - start) * 1000.0,
+                "Paprika pose model warmed up for %dx%d frames in %.0f ms",
+                width, height, (time.perf_counter() - start) * 1000.0,
             )
         except Exception as exc:
             log.warning("Paprika pose warm-up skipped: %s", exc)
@@ -358,6 +395,10 @@ class PaprikaDetector:
             if model is None:
                 return []
             infer_start = time.perf_counter()
+            # Warmed up for the startup frame shape only. A frame of another
+            # shape - the camera rotated 90 degrees in the HMI, or a folder
+            # image of a different size - makes cuDNN benchmark mode retune on
+            # this call: a one-off cost of a slow cycle, then full speed.
             results = model.predict(
                 frame, imgsz=self._imgsz, conf=self.confidence, verbose=False
             )

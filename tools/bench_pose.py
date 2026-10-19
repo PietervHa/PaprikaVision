@@ -5,6 +5,7 @@ Measure what the pose model actually costs, and what would make it cheaper
     python -m tools.bench_pose --frames data/raw --runs 30
     python -m tools.bench_pose --onnx          also export and time ONNX
     python -m tools.bench_pose --two-stage     boxes first, then a model on crops
+    python -m tools.bench_pose --cudnn-benchmark   as the app runs by default
 
 Times the model as the application calls it, then times the alternatives, on
 this machine. Nothing here is a recommendation until the numbers come out -
@@ -255,6 +256,10 @@ def main() -> int:
     parser.add_argument("--crop-margin", type=float, default=0.10,
                         help="--two-stage: widen each box by this share of "
                              "its size on every side before cropping")
+    parser.add_argument("--cudnn-benchmark", action="store_true",
+                        help="let cuDNN time its algorithms per input shape, "
+                             "as paprika.pose.cudnn_benchmark does in the app. "
+                             "Off by default here so both tables can be run.")
     parser.add_argument("--device", default=None,
                         help="pin the device: 0, cuda:0 or cpu. Unset lets "
                              "ultralytics choose - which is worth checking.")
@@ -277,8 +282,14 @@ def main() -> int:
         print(f"No frames under {args.frames}")
         return 1
 
+    # Set explicitly either way, before the first predict, so an "off" run is
+    # off whatever torch or ultralytics would otherwise default to. The time_model
+    # warm-up then pays the per-shape tuning, not the timed calls.
+    torch.backends.cudnn.benchmark = args.cudnn_benchmark
+
     cuda = torch.cuda.is_available()
-    print(f"\ntorch {torch.__version__}   cuda available: {cuda}")
+    print(f"\ntorch {torch.__version__}   cuda available: {cuda}   "
+          f"cudnn.benchmark: {torch.backends.cudnn.benchmark}")
     if cuda:
         print(f"device: {torch.cuda.get_device_name(0)} "
               f"compute {torch.cuda.get_device_capability(0)}")

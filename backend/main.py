@@ -14,12 +14,12 @@ import time
 
 import uvicorn
 
-from backend.core.image_source import build_source
+from backend.core.image_source import ImageFolderSource, build_source
 from backend.core.config_loader import cfg
 from backend.core.manual_capture import ManualCapture
 from backend.core.state import AppState
 from backend.core.tcp_trigger_server import TCPTriggerServer
-from backend.core.vision import bind_app_state, run_vision
+from backend.core.vision import bind_app_state, get_engine, run_vision
 from backend.output.result_writer import save_result
 from backend.utils.logger import UVICORN_LOG_CONFIG, get_logger, setup_logging
 from frontend.web import create_app
@@ -108,6 +108,48 @@ def _live_result(app_state) -> dict:
     result["source"] = "trigger"
     return result
 
+WARM_UP_FRAME_TIMEOUT_S = 10.0
+
+
+def _warm_up_on_first_frame(camera, app_state) -> None:
+    """Warm the model up on the shape of the frames the line will actually send.
+
+    cuDNN benchmark mode tunes per input shape, so the warm-up has to see the
+    real frame size, and only the source knows it: the folder's images, or
+    the camera after flip and HMI rotation. Runs before the trigger server and
+    the HMI start, so no cycle can reach a model that is still tuning.
+    """
+    engine = get_engine()
+    if engine is None:
+        return
+    deadline = time.monotonic() + WARM_UP_FRAME_TIMEOUT_S
+    frame = camera.get_frame()
+    while frame is None and time.monotonic() < deadline:
+        time.sleep(0.1)
+        frame = camera.get_frame()
+    if frame is not None:
+        engine.warm_up(frame.shape)
+        return
+
+    camera_cfg = cfg.get("camera") if isinstance(cfg.get("camera"), dict) else {}
+    if isinstance(camera, ImageFolderSource) or not camera_cfg.get("width"):
+        log.warning(
+            "No frame within %.0f s to warm the pose model up on - the first "
+            "cycle will pay the warm-up", WARM_UP_FRAME_TIMEOUT_S,
+        )
+        return
+    # The configured size, as camera.py would deliver it: a 90 or 270 degree
+    # rotation swaps width and height.
+    height, width = int(camera_cfg.get("height", 1024)), int(camera_cfg["width"])
+    if app_state.get_camera_rotation() % 2:
+        height, width = width, height
+    log.warning(
+        "No camera frame within %.0f s - warming the pose model up on the "
+        "configured %dx%d", WARM_UP_FRAME_TIMEOUT_S, width, height,
+    )
+    engine.warm_up((height, width))
+
+
 def vision_trigger_loop(camera, app_state, capture=None):
     import keyboard
 
@@ -143,6 +185,7 @@ def main():
 
     # Camera or a folder of raw images, see camera.source in the config.
     camera = build_source(app_state)
+    _warm_up_on_first_frame(camera, app_state)
 
     web_cfg = cfg["web"]
     app = create_app(camera, app_state)

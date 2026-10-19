@@ -225,13 +225,20 @@ Restart the app — config is read at startup. The HMI's Detector field should
 read `pose`, and `data/logs/vision.log` should show:
 
 ```
+cuDNN benchmark mode: on
 Paprika pose model loaded: models/paprika_pose.pt
-Paprika pose model warmed up in NNN ms
+Paprika pose model warmed up for 900x1092 frames in NNN ms
 ```
 
-The warm-up runs one throwaway inference at load. A cold CUDA model compiles
-kernels on its first call — seconds, not milliseconds — and without this that
-lands on whichever fruit arrives first after a restart.
+The warm-up runs one throwaway inference at startup, on a blank the size of
+the first frame the camera or folder delivers. A cold CUDA model compiles
+kernels on its first call — seconds, not milliseconds — and with cuDNN
+benchmark mode on (see Speed) it also tunes for the input shape. Without the
+warm-up that lands on whichever fruit arrives first after a restart. It has to
+be the real frame size: predict letterboxes a 900x1092 frame at imgsz 416 to
+352x416, so a square warm-up would tune a shape the line never sends. Rotating
+the camera in the HMI, or a folder image of a different size, costs one slow
+cycle while cuDNN retunes, then runs at full speed.
 
 ### Scoring honestly
 
@@ -252,12 +259,32 @@ shape on red rather than picking one.
 
 ```
 python -m tools.bench_pose --device cuda:0
+python -m tools.bench_pose --device cuda:0 --cudnn-benchmark
 ```
 
-On a Quadro M1200 the forward pass is ~88 ms and framework overhead is 0.1 ms —
-measured. ONNX and TensorRT have nothing to remove, `half=True` does nothing
-below compute 7.0, and no architecture in the family is faster. 40 ms is not
-reachable on that card. Re-run this if you change GPU, model or image size.
+On a Quadro M1200, 900x1092 frames, median ms:
+
+| imgsz | benchmark off | benchmark on |
+|------:|--------------:|-------------:|
+|   640 |          89.1 |         86.4 |
+|   512 |          99.0 |         59.4 |
+|   480 |          93.3 |         56.0 |
+|   416 |          55.2 |         45.5 |
+|   320 |          45.7 |         36.0 |
+
+An earlier version of this guide said 40 ms was not reachable on this card.
+That was measured with cuDNN benchmark mode off. Off, cuDNN picks a
+convolution algorithm by heuristic, and for some input shapes it picks a slow
+one: 512 and 480 came out slower than 640. On, it times the candidates the
+first time it sees a shape and keeps the fastest. The app turns it on
+through `paprika.pose.cudnn_benchmark` (default `true`). With it on, 320 is
+under 40 ms and 416 is close.
+
+The rest still holds: framework overhead is 0.1 ms, so ONNX and TensorRT have
+nothing to remove, `half=True` does nothing below compute 7.0, and no
+architecture in the family is faster. A smaller imgsz needs a model trained at
+that size; see `tools/bench_pose`. Re-run this if you change GPU, model or
+image size.
 
 ---
 

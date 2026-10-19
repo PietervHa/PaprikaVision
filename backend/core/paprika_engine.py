@@ -309,6 +309,10 @@ class PaprikaEngine:
     def is_ready(self) -> bool:
         return self._detector.is_ready()
 
+    def warm_up(self, frame_shape) -> None:
+        """Warm the model up for frames of this shape; see PaprikaDetector.warm_up."""
+        self._detector.warm_up(frame_shape)
+
     def status(self) -> dict:
         status = self._detector.status()
         status.update(

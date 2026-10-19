@@ -200,12 +200,20 @@ paprika:
 
   pose:
     model_path: "models/paprika_pose.pt"
-    imgsz: 640
+    imgsz: 416
     # Below this, a landmark is treated as "positioned but not visible" rather
     # than discarded. That distinction is what lets the engine tell a fruit
     # standing stem-down from one it simply failed on, so do not set it so high
     # that occluded landmarks vanish entirely.
     keypoint_confidence: 0.30
+    # Let cuDNN time its algorithms for each input shape instead of guessing.
+    # Off, it picks slow ones for some shapes. Quadro M1200, 900x1092 frames,
+    # tools/bench_pose, median ms, off -> on:
+    #   640: 89.1 -> 86.4   512: 99.0 -> 59.4   480: 93.3 -> 56.0
+    #   416: 55.2 -> 45.5   320: 45.7 -> 36.0
+    # Tuning happens on the first call per shape; the startup warm-up pays it
+    # for the real frame size. Only matters on CUDA.
+    cudnn_benchmark: true
 
   # ---------------------------------------------------------------------------
   # policy: when is an angle trustworthy enough to act on?
