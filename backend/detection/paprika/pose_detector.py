@@ -163,21 +163,36 @@ class PaprikaDetector:
 
     # -------------------------------------------------------------- dispatch
 
-    def detect(self, frame: np.ndarray) -> list[dict]:
+    def detect(self, frame: np.ndarray, timing: Optional[dict] = None) -> list[dict]:
         """Return raw detections: [{bbox, confidence, keypoints}].
 
         `keypoints` maps landmark name -> Keypoint, and may be empty (the shape
         backend never produces landmarks). Orientation is NOT computed here -
         that belongs to the engine, so all three backends stay comparable.
+
+        `timing`, when given, is filled in with where the time went. It is the
+        caller's dict rather than an attribute on the detector because the
+        overlay and a trigger run this concurrently on one instance, and a
+        shared "last timing" would hand one of them the other's numbers.
+        lock_wait_ms and inference_ms stay None on backends with no model and
+        no lock - absent, not zero.
         """
+        if timing is not None:
+            timing.setdefault("lock_wait_ms", None)
+            timing.setdefault("inference_ms", None)
         if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
             return []
 
         if self.backend == "pose":
-            return self._detect_pose(frame)
+            return self._detect_pose(frame, timing)
+        start = time.perf_counter()
         if self.backend == "simulator":
-            return self._detect_simulator(frame)
-        return self._detect_shape(frame)
+            detections = self._detect_simulator(frame)
+        else:
+            detections = self._detect_shape(frame)
+        if timing is not None:
+            timing["detect_ms"] = round((time.perf_counter() - start) * 1000, 2)
+        return detections
 
     # ----------------------------------------------------------- shape route
 
@@ -331,14 +346,26 @@ class PaprikaDetector:
             return ""
         return colour_name(float(np.median(hue[fruit])))
 
-    def _detect_pose(self, frame: np.ndarray) -> list[dict]:
+    def _detect_pose(self, frame: np.ndarray, timing: Optional[dict] = None) -> list[dict]:
+        # The lock wait is timed apart from the inference because they have
+        # different fixes. The overlay worker runs this same detector, so a
+        # trigger arriving mid-preview queues here behind a whole forward pass,
+        # and processing_time_ms alone cannot tell that from a slow model.
+        wait_start = time.perf_counter()
         with self._model_lock:
+            acquired = time.perf_counter()
             model = self._load_model()
             if model is None:
                 return []
+            infer_start = time.perf_counter()
             results = model.predict(
                 frame, imgsz=self._imgsz, conf=self.confidence, verbose=False
             )
+            infer_end = time.perf_counter()
+        if timing is not None:
+            timing["lock_wait_ms"] = round((acquired - wait_start) * 1000, 2)
+            timing["inference_ms"] = round((infer_end - infer_start) * 1000, 2)
+            timing["detect_ms"] = round((infer_end - wait_start) * 1000, 2)
 
         detections: list[dict] = []
         for result in results:

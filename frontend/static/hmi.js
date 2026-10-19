@@ -143,7 +143,7 @@ function setMeter(barId, valId, value) {
 
 /* ----------------------------------------------------------------- render */
 
-function renderLive(live) {
+function renderLive(live, fromTrigger = false) {
   const card = $("angleCard");
   const primary = live && live.primary;
 
@@ -154,8 +154,18 @@ function renderLive(live) {
 
   if (!primary || live.stale) {
     $("angleNumber").textContent = "—";
-    $("placementText").textContent = live && live.stale ? "no recent result" : "waiting for fruit";
-    $("poseText").textContent = "—";
+    // A paused rail showing a trigger that found nothing must not read as a
+    // live view of an empty belt - that is the confusion the label exists for.
+    // Only "no fruit" when that is what happened: a trigger also comes back
+    // without a primary on a camera failure, a timeout or an exception, and
+    // calling those "no fruit" would send someone to look at the belt.
+    const reason = live && live.reason;
+    $("placementText").textContent = fromTrigger
+      ? (!reason || reason === "no_paprika_detected"
+          ? "no fruit on last trigger"
+          : `last trigger: ${reason.replace(/_/g, " ")}`)
+      : live && live.stale ? "no recent result" : "waiting for fruit";
+    $("poseText").textContent = fromTrigger ? "last trigger" : "—";
     $("factSource").textContent = "—";
     setMeter("barAxis", "valAxis", null);
     setMeter("barFlip", "valFlip", null);
@@ -187,7 +197,10 @@ function renderLive(live) {
     placement === "review"
       ? "human check needed"
       : poseLabels[orientation.pose] || placement;
-  $("poseText").textContent = orientation.pose ? orientation.pose.replace(/_/g, " ") : "—";
+  const poseWords = orientation.pose ? orientation.pose.replace(/_/g, " ") : "—";
+  // Said on screen, because a rail that has quietly stopped following the
+  // belt looks exactly like one that is following it and seeing the same fruit.
+  $("poseText").textContent = fromTrigger ? `last trigger · ${poseWords}` : poseWords;
   $("factSource").textContent = orientation.source || "—";
 
   setMeter("barAxis", "valAxis", orientation.confidence);
@@ -215,7 +228,20 @@ async function pollResult() {
   try {
     const res = await fetch("/result");
     const data = await res.json();
-    renderLive(data.live);
+    if (data.live && data.live.paused) {
+      // The overlay stands aside while the line is triggering, so the live
+      // preview is empty; show what the machine last actually acted on.
+      const last = data.result || {};
+      renderLive({
+        primary: last.primary,
+        count: (last.detections || []).length,
+        stale: false,
+        scan_ms: last.processing_time_ms,
+        reason: last.failure_reason,
+      }, true);
+    } else {
+      renderLive(data.live);
+    }
     renderCounters(data.counters);
     $("cameraDown").hidden = true;
   } catch (err) {

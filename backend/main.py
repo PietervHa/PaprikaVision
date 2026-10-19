@@ -47,9 +47,27 @@ def _process_vision_result(result, trigger_time, app_state):
         except Exception as exc:
             log.error("Failed to write result: %s", exc)
 
+        # The split behind processing_time_ms. lock_wait_ms is the time this
+        # trigger queued behind an overlay preview on the model; it is what
+        # hmi.overlay_pause_after_trigger_s exists to remove. detect_ms is the
+        # detector stage on every backend - for pose, lock wait plus inference;
+        # for shape, the classical search - and detect_ms + post_ms is the
+        # engine's whole processing_time_ms.
+        #
+        # "-" means not measured, never 0: lock_wait_ms and infer_ms are "-"
+        # on shape and simulator, which have no model and no lock, and every
+        # field is "-" on a cycle that never reached the engine (no camera
+        # frame, a timeout).
+        timing = result.get("timing") or {}
+
+        def _ms(key):
+            value = timing.get(key)
+            return "-" if value is None else f"{float(value):.1f}"
+
         log.info(
             "CYCLE: status=%s placement=%s angle=%s pose=%s conf=%.2f "
-            "detections=%d cycle_ms=%s reason=%s",
+            "detections=%d cycle_ms=%s lock_wait_ms=%s infer_ms=%s detect_ms=%s "
+            "post_ms=%s reason=%s",
             result.get("status"),
             placement or "-",
             primary.get("angle_plc"),
@@ -57,6 +75,10 @@ def _process_vision_result(result, trigger_time, app_state):
             float(orientation.get("confidence", 0.0)),
             len(result.get("detections", [])),
             cycle_time_ms,
+            _ms("lock_wait_ms"),
+            _ms("inference_ms"),
+            _ms("detect_ms"),
+            _ms("post_ms"),
             result.get("failure_reason", "-"),
         )
     except Exception as exc:

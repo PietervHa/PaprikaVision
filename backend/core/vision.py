@@ -79,10 +79,24 @@ def run_vision(frame, callback=None, profile: bool = False):
     if not callback:
         return _engine.evaluate(frame)
 
+    # Every callback cycle is a trigger - the TCP server and the 'q' key both
+    # come through here, while the overlay calls the engine directly. Marking
+    # it here covers both without either caller knowing the overlay exists.
+    # Marked before the submit, so the overlay stays off the model while this
+    # cycle is still queued on the pool; cleared as soon as the engine is done,
+    # so the hold-off counts from the end of inference, not from the end of
+    # the database write.
+    if _app_state is not None:
+        _app_state.trigger_started()
+
     def worker():
         start = time.perf_counter()
         try:
-            result = _engine.evaluate(frame)
+            try:
+                result = _engine.evaluate(frame)
+            finally:
+                if _app_state is not None:
+                    _app_state.trigger_finished()
         except Exception as exc:
             logger.error("Vision worker exception: %s", exc)
             result = _empty_result("vision_exception")
@@ -90,5 +104,12 @@ def run_vision(frame, callback=None, profile: bool = False):
             result["processing_time_ms"] = round((time.perf_counter() - start) * 1000, 2)
         callback(result)
 
-    _pool.submit(worker)
+    try:
+        _pool.submit(worker)
+    except Exception:
+        # Never reached the pool, so the worker that would clear the mark will
+        # never run. Left set, it would hold the overlay off for good.
+        if _app_state is not None:
+            _app_state.trigger_finished()
+        raise
     return None

@@ -552,6 +552,21 @@ hmi:
   # Blank the overlay when the newest result is older than this. Boxes that no
   # longer line up with the fruit are worse than no boxes.
   overlay_stale_after_s: 2.0
+  # Keep the overlay off the model while the line is triggering. The overlay
+  # and a trigger share one pose model behind one lock, so a trigger arriving
+  # mid-preview waits a whole forward pass (~88 ms on the Quadro M1200). After
+  # any triggered cycle (PLC or the 'q' key) no new overlay inference starts
+  # for this long, and none starts while a trigger is in flight. One already
+  # running cannot be pre-empted. While paused the live view shows no boxes -
+  # see overlay_stale_after_s - and the HMI rail shows the last triggered
+  # result instead.
+  #
+  # Must be LONGER than the line's trigger interval to have any effect: with
+  # triggers every 2 s and this at 1.5, the overlay wakes in every gap and is
+  # mid-inference again when the next trigger lands. 0 = no pause, the overlay
+  # and the trigger take turns on the model as before. Display only: nothing
+  # here changes what the PLC is told, a counter, or a placement.
+  overlay_pause_after_trigger_s: 3.0
 
   # Show only the belt in the HMI instead of the whole sensor. The camera also
   # sees the pale side strips and whatever is behind the line, none of which is

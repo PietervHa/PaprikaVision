@@ -242,6 +242,7 @@ def record_run(run_dir: Path, root: Path) -> int:
         "epochs": args.get("epochs"),
         "patience": args.get("patience"),
         "batch": args.get("batch"),
+        "degrees": args.get("degrees"),
         "git_commit": commit,
         "replaced": None,
         "recorded_after_the_fact": True,
@@ -324,6 +325,14 @@ def main() -> int:
                         help="initial learning rate. Leave unset for auto. "
                              "0.0005 or so when warm-starting, so the model "
                              "adjusts rather than overwrites.")
+    parser.add_argument("--degrees", type=float, default=0.0,
+                        help="random rotation range in degrees, passed to "
+                             "yolo as degrees=. 180 rotates through the full "
+                             "circle, as ANNOTATION_SPEC section 8 asks. "
+                             "Default 0.0, which every run so far has used. "
+                             "Rotation also loosens the boxes, and box size "
+                             "feeds min_span_ratio - score before adopting it. "
+                             "See POSE_MODEL_GUIDE section 3.")
     parser.add_argument("--base-dataset", action="append", default=[],
                         metavar="PATH",
                         help="an existing exported dataset to build on. "
@@ -453,7 +462,10 @@ def main() -> int:
              # measured, mixed precision buys nothing on this card. workers=4
              # rather than 8 because the machine runs near its RAM limit and
              # each worker is a separate process.
-             "amp=False", "workers=4"]
+             "amp=False", "workers=4",
+             # Always passed, even at 0.0 (ultralytics' own default), so the
+             # command line printed above is the whole story of the run.
+             f"degrees={args.degrees}"]
     if args.freeze is not None:
         train.append(f"freeze={args.freeze}")
     if args.lr0 is not None:
@@ -523,6 +535,7 @@ def main() -> int:
         "epochs": args.epochs,
         "patience": args.patience,
         "batch": args.batch,
+        "degrees": args.degrees,
         "git_commit": commit,
         "replaced": str(backup) if backup else None,
     }, indent=2), encoding="utf-8")

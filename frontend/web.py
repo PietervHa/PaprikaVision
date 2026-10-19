@@ -118,7 +118,12 @@ def create_app(camera, app_state) -> FastAPI:
                 continue
 
             snapshot = app_state.get_overlay(max_age_s=OVERLAY_STALE_S, now=time.time())
-            detections = snapshot["detections"]
+            # Checked here as well as in the worker, which clears the overlay
+            # when it pauses: whatever the snapshot holds, nothing is drawn
+            # while the line is triggering. A box from one frame on a later
+            # frame of a moving belt points at where the fruit used to be.
+            overlay_paused = overlay.is_running() and overlay.is_paused()
+            detections = [] if overlay_paused else snapshot["detections"]
 
             # Cropped for display only. Detection ran on the full frame and the
             # PLC is told about full-frame coordinates; only what is drawn here
@@ -155,6 +160,8 @@ def create_app(camera, app_state) -> FastAPI:
                     )
                 if not overlay.is_running():
                     lines.append("Live overlay stopped")
+                elif overlay_paused:
+                    lines.append("Overlay paused - line is triggering")
                 elif snapshot["stale"]:
                     age = snapshot["age_s"]
                     lines.append(
@@ -238,6 +245,11 @@ def create_app(camera, app_state) -> FastAPI:
     def get_result():
         snapshot = app_state.get_snapshot()
         live = app_state.get_overlay(max_age_s=OVERLAY_STALE_S, now=time.time())
+        paused = overlay.is_running() and overlay.is_paused()
+        if paused:
+            # Same rule as the stream: no preview while the line triggers. The
+            # rail falls back to "result", the last triggered cycle.
+            live = {**live, "primary": None, "detections": [], "stale": True}
         return {
             "result": snapshot["result"],
             "counters": snapshot["counters"],
@@ -250,6 +262,7 @@ def create_app(camera, app_state) -> FastAPI:
                 "count": len(live["detections"]),
                 "stale": live["stale"],
                 "scan_ms": live["scan_ms"],
+                "paused": paused,
             },
         }
 

@@ -163,7 +163,27 @@ Useful options:
 --imgsz 640                       must match paprika.pose.imgsz
 --base yolo11n-pose.pt            train fresh (default)
 --base models/paprika_pose.pt     fine-tune from existing weights
+--degrees 180                     random rotation, full circle (default 0.0)
 ```
+
+### Rotation augmentation: prepared, not yet tried
+
+`ANNOTATION_SPEC.md` section 8 asks for rotation through the full ±180°, and
+every run in `runs/pose` so far trained with `degrees: 0.0` - the ultralytics
+default, never changed. `--degrees` passes the value to `yolo pose train` and
+records it in `MANIFEST.json`. The default stays 0.0, so nothing changes until
+you ask for it.
+
+Do not adopt it on the strength of the spec alone. Ultralytics rotates the
+keypoints correctly, but the box becomes the upright rectangle around the
+rotated box, which is larger than the fruit. The model learns looser boxes,
+and box size is not cosmetic here: `span_ratio` is the landmark span divided by
+the box diagonal, so a looser box lowers it and pushes fruit towards
+`min_span_ratio` (0.18, below which the fruit is called standing) and
+`end_on_span_ratio_max` (0.22, where the end-on check is consulted). How far
+it moves is not measured. Train one with and one without on the same dataset,
+score both on the val split, and compare the standing count as well as the
+angle error.
 
 ### Reading `dataset_check`
 

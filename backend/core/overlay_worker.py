@@ -29,6 +29,17 @@ somebody watching the live view, and this thread is what they are watching.
 
 It stays display-only in the sense that matters: it writes to data/debug and
 nowhere else, touches no counter, and cannot reach the PLC.
+
+Standing aside for the trigger
+------------------------------
+This thread runs the same engine as the trigger, and the pose detector holds
+one lock around the model. A trigger landing while a preview inference runs
+queues behind a whole forward pass (~88 ms measured on a Quadro M1200), and
+that wait used to be counted in the trigger's processing_time_ms. With
+hmi.overlay_pause_after_trigger_s set, the worker starts no inference while a
+trigger is in flight or for that long after one. While held, the published
+overlay is cleared rather than left standing: boxes from one frame drawn onto
+a later frame of a moving belt do not line up with anything.
 """
 
 from __future__ import annotations
@@ -306,6 +317,11 @@ class OverlayWorker:
 
         hmi_cfg = cfg.get("hmi") if isinstance(cfg.get("hmi"), dict) else {}
         self._interval_s = max(0.0, float(hmi_cfg.get("overlay_interval_s", 0.15)))
+        # 0 turns the hold-off off entirely, in-flight check included: the
+        # overlay and the trigger take turns on the model lock as before.
+        self._pause_after_trigger_s = max(
+            0.0, float(hmi_cfg.get("overlay_pause_after_trigger_s", 3.0))
+        )
 
         debug_cfg = cfg.get("debug") if isinstance(cfg.get("debug"), dict) else {}
         self._capture = _FailureCapture(debug_cfg)
@@ -328,7 +344,10 @@ class OverlayWorker:
         self._capture.start()
         self._thread = threading.Thread(target=self._run, name="overlay_worker", daemon=True)
         self._thread.start()
-        log.info("Overlay worker started (interval %.2fs)", self._interval_s)
+        log.info(
+            "Overlay worker started (interval %.2fs, pause after trigger %.1fs)",
+            self._interval_s, self._pause_after_trigger_s,
+        )
         return True
 
     def stop(self) -> None:
@@ -349,8 +368,33 @@ class OverlayWorker:
             return False
         return self.start()
 
+    def is_paused(self) -> bool:
+        """True while the line is triggering and the overlay is standing aside."""
+        return self._app_state.overlay_held(self._pause_after_trigger_s)
+
+    def _hold_while_triggering(self) -> bool:
+        """Wait out a trigger hold-off. True if one was waited on.
+
+        Polled rather than signalled: the hold ends either when a trigger
+        finishes plus pause_s, or later if another arrives meanwhile, and a
+        short poll answers both without the trigger path having to know this
+        thread exists. 50 ms is a fraction of one overlay interval, so resuming
+        is not noticeably late, and it is a sleep, not a spin.
+        """
+        if not self.is_paused():
+            return False
+        # Cleared, not left to go stale: overlay_stale_after_s is 2 s, and for
+        # those 2 s the stream would draw the last preview's boxes over frames
+        # in which the fruit have since moved on.
+        self._app_state.clear_overlay()
+        while not self._stop_event.is_set() and self.is_paused():
+            self._stop_event.wait(0.05)
+        return True
+
     def _run(self) -> None:
         while not self._stop_event.is_set():
+            if self._hold_while_triggering():
+                continue
             cycle_start = time.perf_counter()
             try:
                 frame = self._camera.get_frame()
@@ -358,11 +402,27 @@ class OverlayWorker:
                     self._stop_event.wait(0.2)
                     continue
 
+                # Checked again as late as possible to narrow the window, but
+                # it cannot be closed: a trigger arriving after this line waits
+                # behind the inference below for up to one forward pass. An
+                # inference already running cannot be pre-empted - ultralytics
+                # has no way to abandon a predict() part way - so that one
+                # wait is accepted. lock_wait_ms in the trigger's result shows
+                # how often it happens.
+                if self.is_paused():
+                    continue
+
                 result = self._engine.evaluate(frame)
                 # Before the overlay is published, and on the untouched frame:
                 # nothing here draws on it, and the annotated copy the HMI
                 # builds is useless as an input to re-run detection on.
                 self._capture.offer(frame, result)
+                if self.is_paused():
+                    # A trigger arrived while this ran. Its frame is already
+                    # behind the live one, and publishing it now would put
+                    # those boxes on frames they do not belong to.
+                    self._app_state.clear_overlay()
+                    continue
                 self._app_state.set_overlay(
                     detections=result.get("detections") or [],
                     primary=result.get("primary"),
@@ -384,6 +444,8 @@ class OverlayWorker:
         return {
             "running": self.is_running(),
             "interval_s": self._interval_s,
+            "pause_after_trigger_s": self._pause_after_trigger_s,
+            "paused": self.is_running() and self.is_paused(),
             "error": self._last_error,
             "failure_capture": self._capture.status(),
         }

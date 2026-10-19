@@ -15,6 +15,8 @@ Result contract
       "confidence": float,
       "processing_time_ms": float,
       "failure_reason": str            # only when status is NOK
+      "timing": {backend, lock_wait_ms, inference_ms, detect_ms,
+                 post_ms, total_ms}    # see PaprikaEngine._timing
     }
 
 Each detection carries:
@@ -1066,9 +1068,42 @@ class PaprikaEngine:
             key=lambda d: (d["bbox"][2] - d["bbox"][0]) * (d["bbox"][3] - d["bbox"][1]),
         )
 
+    def _timing(self, total_ms: float, detector_timing: Optional[dict] = None) -> dict:
+        """Where this cycle's time went, for the result record.
+
+        processing_time_ms on its own cannot say whether a slow cycle was the
+        model, the work after it, or a trigger queued behind an overlay preview
+        on the model lock - and those three have nothing in common as fixes.
+
+        detect_ms is the detector stage: for pose that is the lock wait plus
+        the forward pass, for shape the classical search, for the simulator
+        next to nothing. post_ms is everything else - result parsing,
+        orientation, policy - so detect_ms + post_ms = total_ms on every
+        backend. lock_wait_ms and inference_ms are None where there is no
+        model and no lock; None, not 0, because nothing was measured.
+
+        total_ms is handed in rather than read off the clock here, so it is
+        the same number as the result's processing_time_ms, not one taken a
+        few microseconds later that a comparison would trip over.
+        """
+        timing = dict(detector_timing or {})
+        detect_ms = timing.get("detect_ms")
+        return {
+            "backend": self._backend,
+            "lock_wait_ms": timing.get("lock_wait_ms"),
+            "inference_ms": timing.get("inference_ms"),
+            "detect_ms": detect_ms,
+            "post_ms": (
+                None if detect_ms is None
+                else round(max(0.0, total_ms - float(detect_ms)), 2)
+            ),
+            "total_ms": total_ms,
+        }
+
     def evaluate(self, frame: np.ndarray) -> dict:
         """Full cycle: detect, orient, decide."""
         start = time.perf_counter()
+        detector_timing: dict = {}
 
         if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
             return {
@@ -1079,32 +1114,37 @@ class PaprikaEngine:
                 "confidence": 0.0,
                 "processing_time_ms": 0.0,
                 "failure_reason": "no_frame",
+                "timing": self._timing(0.0),
             }
 
         if not self.is_ready():
+            processing_time_ms = round((time.perf_counter() - start) * 1000, 2)
             return {
                 "status": "NOK",
                 "mode": "paprika",
                 "detections": [],
                 "primary": None,
                 "confidence": 0.0,
-                "processing_time_ms": round((time.perf_counter() - start) * 1000, 2),
+                "processing_time_ms": processing_time_ms,
                 "failure_reason": "detector_unavailable",
+                "timing": self._timing(processing_time_ms),
             }
 
         try:
-            raw = self._detector.detect(frame)
+            raw = self._detector.detect(frame, timing=detector_timing)
         except Exception as exc:
             log.error("Paprika detection failed: %s", exc)
+            processing_time_ms = round((time.perf_counter() - start) * 1000, 2)
             return {
                 "status": "NOK",
                 "mode": "paprika",
                 "detections": [],
                 "primary": None,
                 "confidence": 0.0,
-                "processing_time_ms": round((time.perf_counter() - start) * 1000, 2),
+                "processing_time_ms": processing_time_ms,
                 "failure_reason": "detector_error",
                 "error": str(exc),
+                "timing": self._timing(processing_time_ms, detector_timing),
             }
 
         detections = [self._evaluate_one(frame, d) for d in raw]
@@ -1112,6 +1152,7 @@ class PaprikaEngine:
         primary = self._pick_primary(detections, frame_width, frame_height)
 
         processing_time_ms = round((time.perf_counter() - start) * 1000, 2)
+        timing = self._timing(processing_time_ms, detector_timing)
 
         if primary is None:
             return {
@@ -1122,6 +1163,7 @@ class PaprikaEngine:
                 "confidence": 0.0,
                 "processing_time_ms": processing_time_ms,
                 "failure_reason": "no_paprika_detected",
+                "timing": timing,
             }
 
         placeable = primary["placement"] == PLACEMENT_PLACE
@@ -1137,6 +1179,7 @@ class PaprikaEngine:
             "primary": primary,
             "confidence": float(primary["orientation"].get("confidence", 0.0)),
             "processing_time_ms": processing_time_ms,
+            "timing": timing,
         }
         if not placeable:
             result["failure_reason"] = f"not_placeable_{primary['placement']}"
