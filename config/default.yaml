@@ -199,7 +199,15 @@ paprika:
     edge_cut_threshold: 0.30
 
   pose:
-    model_path: "data/debug/bench_cpu/paprika-pose.onnx"
+    model_path: "models/paprika_pose.onnx"
+    # Where the model runs: "auto", "cpu", or a CUDA index such as "0".
+    # "auto" is the NVIDIA GPU when the runtime can use one, otherwise the CPU;
+    # an .onnx under the plain onnxruntime package always runs on the CPU. An
+    # index with no such GPU stops the app at startup rather than quietly
+    # running somewhere else.
+    # model_path takes the .pt or its ONNX export (python -m tools.export_onnx).
+    # An .onnx has its input size baked in: imgsz must match the export or the
+    # app refuses to start.
     device: "cpu"
     imgsz: 416
     # Below this, a landmark is treated as "positioned but not visible" rather

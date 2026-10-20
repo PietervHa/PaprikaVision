@@ -914,6 +914,9 @@ def score(args) -> int:
 
     source = Path(args.frames).resolve()
     engine = PaprikaEngine(cfg)
+    # A model that cannot run would score every fruit NOT DETECTED, which
+    # reads like a terrible model rather than a broken config.
+    engine.load_model()
     rows = []
     missing = 0
     for name, entries in sorted(labels.items()):

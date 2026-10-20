@@ -17,5 +17,20 @@
   "batch": 16,
   "degrees": 0.0,
   "git_commit": "38c59af",
-  "replaced": "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\models\\paprika_pose_before_v10_416_20261020_083614.pt"
+  "replaced": "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\models\\paprika_pose_before_v10_416_20261020_083614.pt",
+  "onnx": {
+    "path": "models/paprika_pose.onnx",
+    "exported": "2026-10-20T13:43:59",
+    "source": "models/paprika_pose.pt",
+    "source_sha256": "834e18e4f2b48d4d709d2ec5bed621e066342cbbb2fd0b6deb8e6c3f379791c2",
+    "sha256": "6a5bc70f00be9476c6d6438c97fc3075da540b53fcf78b8dba5e59b22403d829",
+    "imgsz": 416,
+    "precision": "fp32",
+    "opset": 19,
+    "simplified": true,
+    "ultralytics": "8.3.40",
+    "torch": "2.5.1+cu118",
+    "onnx": "1.23.0",
+    "onnxruntime": "1.23.2"
+  }
 }

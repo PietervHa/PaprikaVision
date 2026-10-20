@@ -29,6 +29,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -42,6 +43,10 @@ from backend.detection.paprika.classical import (
     EDGE_MARGIN_PX, REASON_EDGE_CLIPPED, colour_name,
 )
 from backend.utils.paths import project_path
+from backend.utils.ultralytics_env import disable_autoinstall
+
+# Before anything can import ultralytics: the line must never pip-install.
+disable_autoinstall()
 
 # Share of the bounding-box perimeter that may lie on the frame border before
 # the fruit counts as incomplete. Calibrated against classical.edge_cut_ratio
@@ -51,6 +56,58 @@ BBOX_EDGE_CUT_THRESHOLD = 0.23
 log = get_logger(__name__)
 
 VALID_BACKENDS = ("shape", "pose", "simulator")
+
+
+class PoseModelConfigError(RuntimeError):
+    """The pose model can never run as configured, so the app must not start.
+
+    Distinct from a model that merely failed to load. A missing file is
+    survivable - someone may be copying weights across, and the HMI shows "not
+    ready" - but an .onnx exported at another imgsz, or a GPU that is not
+    there, fails identically on every cycle. Before this existed that meant an
+    error in the log every 0.15 s from the overlay, and an app that looked like
+    it was running.
+    """
+
+
+def onnx_input_size(path) -> Optional[tuple]:
+    """(height, width) an ONNX export was built for, or None if it is dynamic.
+
+    An ONNX export has its input size baked in; predict letterboxes every frame
+    to exactly that, whatever imgsz says. Read through ONNX Runtime on the CPU
+    because that is the runtime the app uses anyway - nothing extra to install.
+    """
+    import onnxruntime
+
+    session = onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    shape = session.get_inputs()[0].shape
+    height, width = shape[2], shape[3]
+    if not isinstance(height, int) or not isinstance(width, int):
+        return None
+    return height, width
+
+
+def onnx_has_cuda() -> bool:
+    """Whether the installed ONNX Runtime can run on an NVIDIA GPU at all.
+
+    The plain onnxruntime package is CPU-only. Without this check Ultralytics
+    asks for a CUDA session whenever torch sees a GPU, warns, and falls back.
+    """
+    try:
+        import onnxruntime
+
+        return "CUDAExecutionProvider" in onnxruntime.get_available_providers()
+    except Exception:
+        return False
+
+
+def cuda_device_count() -> int:
+    try:
+        import torch
+
+        return torch.cuda.device_count() if torch.cuda.is_available() else 0
+    except Exception:
+        return 0
 
 
 class PaprikaDetector:
@@ -94,10 +151,21 @@ class PaprikaDetector:
         self._imgsz = int(pose_cfg.get("imgsz", 640))
         self._kp_confidence = float(pose_cfg.get("keypoint_confidence", 0.30))
         self._cudnn_benchmark = bool(pose_cfg.get("cudnn_benchmark", True))
+        self._is_onnx = self._model_path.lower().endswith(".onnx")
+
+        # "auto", "cpu", or a CUDA index. YAML reads an unquoted 0 as an int.
+        device = str(pose_cfg.get("device", "auto")).strip().lower()
+        if device not in ("auto", "cpu") and not device.isdigit():
+            log.warning("Unknown paprika.pose.device '%s'; using 'auto'", device)
+            device = "auto"
+        self._device_setting = device
+        # What every predict gets: "cpu" or a CUDA index. Resolved at load.
+        self._device: Optional[str] = None
 
         self._model = None
         self._model_lock = threading.Lock()
         self._model_failed = False
+        self._config_error: Optional[str] = None
 
         self._sim_start = time.time()
 
@@ -110,24 +178,116 @@ class PaprikaDetector:
             return True
         return self._load_model() is not None
 
+    def load_model(self) -> None:
+        """Load the model now, at startup, and refuse if it can never run.
+
+        Raises PoseModelConfigError for a model that would fail every cycle.
+        A model that is merely missing stays non-fatal; see the error class.
+        """
+        if self.backend != "pose":
+            return
+        with self._model_lock:
+            self._load_model()
+        if self._config_error:
+            raise PoseModelConfigError(self._config_error)
+
     def _load_model(self):
-        """Lazily load the pose model, mirroring the old project's YOLO pattern."""
+        """Lazily load the pose model, mirroring the old project's YOLO pattern.
+
+        Fails once: the error is logged here and every later call returns None
+        without trying again, so a broken model costs one log line rather than
+        one per cycle.
+        """
         if self._model is not None:
             return self._model
         if self._model_failed:
             return None
 
         try:
-            self._set_cudnn_benchmark()
+            self._device = self._resolve_device()
+            if self._is_onnx and Path(self._model_path).exists():
+                self._check_onnx_size()
+            # CUDA + PyTorch only. Decided from the config rather than from
+            # whether a GPU is visible: without CUDA the flag does nothing.
+            if not self._is_onnx and self._device_setting != "cpu":
+                self._set_cudnn_benchmark()
             from ultralytics import YOLO
 
-            self._model = YOLO(self._model_path)
-            log.info("Paprika pose model loaded: %s", self._model_path)
+            # task is never left to Ultralytics. For an .onnx it guesses from
+            # the filename, and "paprika_pose.onnx" was guessed as "detect":
+            # every fruit came back undetected, with only a warning.
+            self._model = YOLO(self._model_path, task="pose")
+            log.info(
+                "Paprika pose model loaded: %s | %s | device %s | imgsz %d",
+                self._model_path, self._runtime_name(), self._device_name(), self._imgsz,
+            )
             return self._model
+        except PoseModelConfigError as exc:
+            log.error("%s", exc)
+            self._config_error = str(exc)
+            self._model_failed = True
+            return None
         except Exception as exc:
             log.error("Failed to load paprika pose model '%s': %s", self._model_path, exc)
             self._model_failed = True
             return None
+
+    def _resolve_device(self) -> str:
+        """Turn paprika.pose.device into what predict gets: "cpu" or an index.
+
+        Never left to Ultralytics. "auto" is the GPU when there is one the
+        runtime can use and the CPU otherwise - for an .onnx that means ONNX
+        Runtime must have a CUDA provider, not just torch seeing a card. An
+        explicit index with no such GPU is a config error: quietly running on
+        the CPU instead would hide a machine that is not what the config says.
+        """
+        usable = cuda_device_count() if not self._is_onnx or onnx_has_cuda() else 0
+        if self._device_setting == "cpu":
+            return "cpu"
+        if self._device_setting == "auto":
+            return "0" if usable else "cpu"
+        if int(self._device_setting) >= usable:
+            runtime = "ONNX Runtime" if self._is_onnx else "PyTorch"
+            raise PoseModelConfigError(
+                f"paprika.pose.device is '{self._device_setting}' but {runtime} has "
+                f"no CUDA device {self._device_setting} on this machine. "
+                f'Set paprika.pose.device to "cpu" or "auto".'
+            )
+        return self._device_setting
+
+    def _check_onnx_size(self) -> None:
+        """Refuse an .onnx exported at a different size than paprika.pose.imgsz."""
+        size = onnx_input_size(self._model_path)
+        if size is not None and size != (self._imgsz, self._imgsz):
+            raise PoseModelConfigError(
+                f"{self._model_path} was exported for {size[1]}x{size[0]} input but "
+                f"paprika.pose.imgsz is {self._imgsz}. An ONNX export has a fixed "
+                f"input size: re-export it (python -m tools.export_onnx) or set "
+                f"paprika.pose.imgsz to {size[0]}."
+            )
+
+    def _runtime_name(self) -> str:
+        try:
+            if self._is_onnx:
+                import onnxruntime
+
+                provider = "CPUExecutionProvider" if self._device == "cpu" else "CUDAExecutionProvider"
+                return f"ONNX Runtime {onnxruntime.__version__} ({provider})"
+            import torch
+
+            return f"PyTorch {torch.__version__}"
+        except Exception:
+            return "ONNX Runtime" if self._is_onnx else "PyTorch"
+
+    def _device_name(self) -> str:
+        if self._device in (None, "cpu"):
+            return "cpu"
+        try:
+            import torch
+
+            return f"cuda:{self._device} ({torch.cuda.get_device_name(int(self._device))})"
+        except Exception:
+            return f"cuda:{self._device}"
 
     def _set_cudnn_benchmark(self) -> None:
         """Let cuDNN time its algorithms per input shape instead of guessing.
@@ -182,7 +342,7 @@ class PaprikaDetector:
             blank = np.zeros((height, width, 3), dtype=np.uint8)
             start = time.perf_counter()
             model.predict(blank, imgsz=self._imgsz, conf=self.confidence,
-                          verbose=False)
+                          device=self._device, verbose=False)
             log.info(
                 "Paprika pose model warmed up for %dx%d frames in %.0f ms",
                 width, height, (time.perf_counter() - start) * 1000.0,
@@ -400,7 +560,8 @@ class PaprikaDetector:
             # image of a different size - makes cuDNN benchmark mode retune on
             # this call: a one-off cost of a slow cycle, then full speed.
             results = model.predict(
-                frame, imgsz=self._imgsz, conf=self.confidence, verbose=False
+                frame, imgsz=self._imgsz, conf=self.confidence,
+                device=self._device, verbose=False,
             )
             infer_end = time.perf_counter()
         if timing is not None:

@@ -9,6 +9,10 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("KMP_BLOCKTIME", "0")
 
+# First, before anything imports ultralytics: the line never pip-installs.
+from backend.utils.ultralytics_env import disable_autoinstall
+disable_autoinstall()
+
 import threading
 import time
 
@@ -20,6 +24,7 @@ from backend.core.manual_capture import ManualCapture
 from backend.core.state import AppState
 from backend.core.tcp_trigger_server import TCPTriggerServer
 from backend.core.vision import bind_app_state, get_engine, run_vision
+from backend.detection.paprika.pose_detector import PoseModelConfigError
 from backend.output.result_writer import save_result
 from backend.utils.logger import UVICORN_LOG_CONFIG, get_logger, setup_logging
 from frontend.web import create_app
@@ -182,6 +187,17 @@ def main():
     setup_logging()
     app_state = AppState()
     bind_app_state(app_state)
+
+    # Before the camera, the HMI or the PLC listener: a model that cannot run
+    # as configured stops the app here with one error, instead of starting
+    # and logging the same failure on every overlay cycle.
+    engine = get_engine()
+    if engine is not None:
+        try:
+            engine.load_model()
+        except PoseModelConfigError as exc:
+            log.critical("Refusing to start: %s", exc)
+            raise SystemExit(1)
 
     # Camera or a folder of raw images, see camera.source in the config.
     camera = build_source(app_state)

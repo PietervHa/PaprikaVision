@@ -20,7 +20,7 @@ torch = pytest.importorskip("torch")
 
 
 class StubModel:
-    def __init__(self, path=""):
+    def __init__(self, path="", task=None):
         self.calls = []
         # What the flag was when the model was built - i.e. before any predict.
         self.benchmark_at_load = torch.backends.cudnn.benchmark

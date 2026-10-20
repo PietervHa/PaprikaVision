@@ -90,6 +90,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backend.utils.paths import project_path  # noqa: E402
 from tools import dataset_manifest as dm  # noqa: E402
+from tools.export_onnx import export_onnx  # noqa: E402
 
 IMAGE_SUFFIXES = {".bmp", ".jpg", ".jpeg", ".png"}
 
@@ -369,8 +370,10 @@ def main() -> int:
         )
         pose_cfg = (cfg.get("paprika") or {}).get("pose") or {}
         config_imgsz = int(pose_cfg.get("imgsz", 640))
+        config_model = project_path(pose_cfg.get("model_path"), "models/paprika_pose.pt")
     except Exception:
         config_imgsz = 640
+        config_model = None
     imgsz = args.imgsz or config_imgsz
     if imgsz != config_imgsz:
         print(f"\n!! Training at {imgsz} but paprika.pose.imgsz is {config_imgsz}.")
@@ -505,15 +508,46 @@ def main() -> int:
     print("Scoring on data/raw would include the training frames and flatter "
           "the result.")
     live = project_path("models/paprika_pose.pt")
-    backup = None
+    live_onnx = live.with_suffix(".onnx")
+    backup = onnx_backup = None
     if live.exists():
         backup = live.with_name(
             f"paprika_pose_before_{args.name}_{started:%Y%m%d_%H%M%S}.pt"
         )
         shutil.copy2(live, backup)
         print(f"current model backed up to {backup.name}")
+    if live_onnx.exists():
+        onnx_backup = live_onnx.with_name(
+            f"paprika_pose_before_{args.name}_{started:%Y%m%d_%H%M%S}.onnx"
+        )
+        shutil.copy2(live_onnx, onnx_backup)
+        print(f"current ONNX export backed up to {onnx_backup.name}")
 
     shutil.copy2(candidate, live)
+
+    # The .onnx is exported BEFORE scoring, so that when the config points at
+    # it the score covers what the app will actually run.
+    print("\n--- exporting the installed model to ONNX ---")
+    try:
+        onnx_record = export_onnx(live, live_onnx, imgsz)
+    except Exception as exc:
+        print(f"\nONNX export failed: {exc}")
+        # export_onnx leaves the old .onnx untouched on failure, so putting the
+        # old .pt back restores a matching pair.
+        if backup:
+            shutil.copy2(backup, live)
+            print(f"{live.name} restored from {backup.name}; {live_onnx.name} "
+                  f"was not touched.")
+        print(f"The trained weights are still at {candidate}")
+        return 1
+    print(f"exported {live_onnx.name} at imgsz {imgsz}")
+
+    if config_model is not None and config_model.resolve() not in (
+            live.resolve(), live_onnx.resolve()):
+        print(f"\n!! paprika.pose.model_path is {config_model},")
+        print("   not the model just installed - the score below measures THAT "
+              "file, not this run.")
+
     run([sys.executable, "-m", "tools.label_stems", str(val_images),
          "--score", "--worst", "10"], False, root)
 
@@ -540,6 +574,7 @@ def main() -> int:
         "degrees": args.degrees,
         "git_commit": commit,
         "replaced": str(backup) if backup else None,
+        "onnx": onnx_record,
     }, indent=2), encoding="utf-8")
     shutil.copy2(manifest, live.with_suffix(".json"))
     print(f"\nprovenance written to {manifest} and beside the installed weights")
@@ -550,6 +585,8 @@ def main() -> int:
               "nothing more is needed.")
         if backup:
             print(f"To go back:  copy {backup.name} models\\paprika_pose.pt")
+        if onnx_backup:
+            print(f"        and  copy {onnx_backup.name} models\\paprika_pose.onnx")
     return 0
 
 

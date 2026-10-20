@@ -226,8 +226,14 @@ read `pose`, and `data/logs/vision.log` should show:
 
 ```
 cuDNN benchmark mode: on
-Paprika pose model loaded: models/paprika_pose.pt
+Paprika pose model loaded: ...\models\paprika_pose.pt | PyTorch 2.5.1+cu118 | device cuda:0 (Quadro M1200) | imgsz 416
 Paprika pose model warmed up for 900x1092 frames in NNN ms
+```
+
+or, for the ONNX export on the CPU (see "GPU or CPU" below):
+
+```
+Paprika pose model loaded: ...\models\paprika_pose.onnx | ONNX Runtime 1.23.2 (CPUExecutionProvider) | device cpu | imgsz 416
 ```
 
 The warm-up runs one throwaway inference at startup, on a blank the size of
@@ -280,11 +286,84 @@ first time it sees a shape and keeps the fastest. The app turns it on
 through `paprika.pose.cudnn_benchmark` (default `true`). With it on, 320 is
 under 40 ms and 416 is close.
 
-The rest still holds: framework overhead is 0.1 ms, so ONNX and TensorRT have
-nothing to remove, `half=True` does nothing below compute 7.0, and no
+The rest still holds on the GPU: framework overhead is 0.1 ms, so ONNX and
+TensorRT have nothing to remove there, `half=True` does nothing below compute 7.0, and no
 architecture in the family is faster. A smaller imgsz needs a model trained at
 that size; see `tools/bench_pose`. Re-run this if you change GPU, model or
 image size.
+
+### GPU or CPU
+
+The line will probably run on an industrial PC that may have no NVIDIA card,
+so the CPU route is the likely production path. On the CPU the model runs best
+as an ONNX export under ONNX Runtime. i7-7820HQ + Quadro M1200, model v10,
+imgsz 416, median ms per frame (`python -m tools.bench_cpu_runtimes`):
+
+| runtime | device | median ms |
+|---|---|---:|
+| PyTorch, cuDNN benchmark on | Quadro M1200 | 45.5 |
+| PyTorch | CPU | 58–62 |
+| ONNX Runtime | CPU | 30–34 |
+
+The export scores the same as the `.pt` on
+`data/datasets/paprika_v10_416/val/images`:
+
+| | `.pt` | `.onnx` |
+|---|---:|---:|
+| placed n | 174 | 173 |
+| median error | 3.4° | 3.4° |
+| p90 | 8.3° | 8.4° |
+| within 10° | 91% | 91% |
+| flipped | 0 | 0 |
+
+CPU numbers do not transfer between machines: run `bench_cpu_runtimes` again on
+the IPC itself.
+
+**Make the export.** `retrain` does this whenever it installs a model; by hand:
+
+```
+python -m tools.export_onnx
+```
+
+It exports `models/paprika_pose.pt` to `models/paprika_pose.onnx` at the size
+recorded in `models/paprika_pose.json` (FP32), and records the export there
+under `"onnx"`, with the hashes of both files. Never copy an `.onnx` in by
+hand — one left over from an older model loads without complaint and runs the
+wrong weights.
+
+**Switch** in `config/default.yaml`, then restart:
+
+```yaml
+  pose:
+    model_path: "models/paprika_pose.onnx"   # CPU
+    device: "cpu"
+```
+
+```yaml
+  pose:
+    model_path: "models/paprika_pose.pt"     # GPU
+    device: "0"                              # or "auto"
+```
+
+`device` is `"auto"` (the GPU when the runtime can use one, else the CPU),
+`"cpu"`, or a CUDA index. The plain `onnxruntime` package has no GPU support,
+so an `.onnx` always runs on the CPU. cuDNN benchmark mode only applies to a
+`.pt` on the GPU.
+
+**Verify.** The `Paprika pose model loaded:` line in `data/logs/vision.log`
+names the file, the runtime, the device and imgsz — check it says what you
+meant. Then score the model the config now points at:
+
+```
+python -m tools.label_stems data\datasets\paprika_v10_416\val\images --score
+```
+
+The app refuses to start, with one error, when the configuration cannot work:
+an `.onnx` exported at a different size than `imgsz`, or a CUDA index on a
+machine where the runtime has no such GPU. It never installs packages at
+runtime: Ultralytics' auto-install is switched off in the app and in every
+tool, so a missing package is an import error and `requirements.txt` is where
+it gets fixed.
 
 ---
 
@@ -400,7 +479,8 @@ aside. If not, you are fine: the exported labels are what trains the model.
 | situation | command |
 |---|---|
 | model misbehaving | set `backend: "shape"` in the config |
-| new model worse than the old | `copy models\paprika_pose_before_*.pt models\paprika_pose.pt` |
+| new model worse than the old | `copy models\paprika_pose_before_*.pt models\paprika_pose.pt`, and the matching `paprika_pose_before_*.onnx` to `paprika_pose.onnx` |
+| `.onnx` out of step with the `.pt` | `python -m tools.export_onnx` |
 | blossom pass done wrong | `python -m tools.label_stems --reset-blossom` |
 | labels look wrong after a reset | rename `stem_labels.backup-*.json` over `stem_labels.json` |
 | labels do not match at scoring time | `python -m tools.label_stems data/raw --repair` |
