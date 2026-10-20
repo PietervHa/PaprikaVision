@@ -469,7 +469,9 @@ def main() -> int:
     if args.freeze is not None:
         train.append(f"freeze={args.freeze}")
     if args.lr0 is not None:
-        train.append(f"lr0={args.lr0}")
+        # optimizer=auto ignores lr0 (Ultralytics says so in the training log),
+        # so name the optimizer auto picked for a dataset this size.
+        train.extend([f"lr0={args.lr0}", "optimizer=AdamW"])
 
     warm = args.base != "yolo11n-pose.pt"
     if args.freeze is not None and not warm:
