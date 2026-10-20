@@ -199,7 +199,8 @@ paprika:
     edge_cut_threshold: 0.30
 
   pose:
-    model_path: "models/paprika_pose.pt"
+    model_path: "data/debug/bench_cpu/paprika-pose.onnx"
+    device: "cpu"
     imgsz: 416
     # Below this, a landmark is treated as "positioned but not visible" rather
     # than discarded. That distinction is what lets the engine tell a fruit
