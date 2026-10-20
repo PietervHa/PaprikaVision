@@ -11,6 +11,16 @@ SQLAlchemy==2.0.51
 # backends run without it, which is what makes the system commissionable
 # before the model exists.
 ultralytics==8.3.40
-torch==2.5.1
-torchvision==0.20.1
+# The CUDA 11.8 build. Plain torch==2.5.1 from PyPI is CPU-only on Windows;
+# this one uses an NVIDIA GPU when there is one and runs on the CPU when not.
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.5.1+cu118
+torchvision==0.20.1+cu118
+# ONNX Runtime runs models/paprika_pose.onnx on the CPU; onnx and onnxslim
+# are for tools/export_onnx. Pinned because Ultralytics' runtime auto-install
+# is switched off. Deliberately NOT onnxruntime-gpu (it shares the onnxruntime
+# package folder and the two overwrite each other) and not openvino.
+onnxruntime==1.23.2
+onnx==1.23.0
+onnxslim==0.1.96
 pygrabber==0.2; sys_platform == "win32"
