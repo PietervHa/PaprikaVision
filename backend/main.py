@@ -13,8 +13,10 @@ os.environ.setdefault("KMP_BLOCKTIME", "0")
 from backend.utils.ultralytics_env import disable_autoinstall
 disable_autoinstall()
 
+import faulthandler
 import threading
 import time
+from datetime import datetime
 
 import uvicorn
 
@@ -27,10 +29,38 @@ from backend.core.vision import bind_app_state, get_engine, run_vision
 from backend.detection.paprika.pose_detector import PoseModelConfigError
 from backend.output.result_writer import save_result
 from backend.utils.logger import UVICORN_LOG_CONFIG, get_logger, setup_logging
+from backend.utils.paths import project_path
 from frontend.web import create_app
 
 log = get_logger(__name__)
 _vision_busy = threading.Event()
+
+# Open for the life of the process: faulthandler writes to it from inside the
+# crash, when nothing can be opened any more.
+_crash_trace_file = None
+
+
+def _enable_crash_trace(logs_dir=None):
+    """Dump every Python thread's stack to a file if the process dies natively.
+
+    An access violation (0xC0000005) kills the process without a Python
+    traceback, so vision.log just stops. This leaves the stacks, and which
+    thread faulted, in data/logs/native_crash.log. Appended to, with a header
+    per start, so dumps can be matched to runs. A fast-fail (0xC0000409) ends
+    the process without running any handler and leaves nothing here - for that
+    one only the Windows event log knows.
+    """
+    global _crash_trace_file
+    logs_dir = project_path("data/logs") if logs_dir is None else logs_dir
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    path = logs_dir / "native_crash.log"
+    _crash_trace_file = open(path, "a", encoding="utf-8")
+    _crash_trace_file.write(
+        f"=== started {datetime.now().isoformat(timespec='seconds')} pid {os.getpid()} ===\n"
+    )
+    _crash_trace_file.flush()
+    faulthandler.enable(file=_crash_trace_file, all_threads=True)
+    return path
 
 
 def _process_vision_result(result, trigger_time, app_state):
@@ -184,7 +214,9 @@ def vision_trigger_loop(camera, app_state, capture=None):
 
 
 def main():
+    crash_trace = _enable_crash_trace()
     setup_logging()
+    log.info("Native crash trace (faulthandler): %s", crash_trace)
     app_state = AppState()
     bind_app_state(app_state)
 

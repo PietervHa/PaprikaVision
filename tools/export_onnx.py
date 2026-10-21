@@ -8,16 +8,27 @@ tools/retrain runs the same export after it installs a new model, so the .pt
 and the .onnx never drift apart: an .onnx left over from an older model loads
 without complaint and quietly runs the wrong weights.
 
+Why the export is dynamic
+-------------------------
+A static export squares every frame up to imgsz x imgsz. The .pt letterboxes
+to a rectangle instead - a 900x1092 frame at 416 becomes 352x416 - and only a
+dynamic export gets the same. Measured on data/datasets/paprika_v10_416/val:
+the static 416x416 export scored worst 21.8 deg and 99% within 20 deg; the
+dynamic one reproduced the .pt exactly (n=174, median 3.4, p90 8.3, 91% within
+10 deg, 100% within 20 deg, worst 18.0, 0 flipped). check_export refuses a
+static result.
+
 Why the size comes from the manifest
 ------------------------------------
-An ONNX export has its input size baked in. The app refuses to start when
-paprika.pose.imgsz disagrees with the export, so the export has to be made at
-the size the model was trained at - the one recorded in the manifest. The .pt
+A dynamic export runs at any size, but the model only scores as measured at
+the size it was trained at - the one recorded in the manifest. The export is
+made at that size and the record written under "onnx" says so; the app reads
+it back and refuses to start when paprika.pose.imgsz disagrees. The .pt
 carries its own training arguments too; when the two disagree the manifest
 belongs to a different model, and this stops rather than guess which is right.
 
-FP32, static shape, simplified with onnxslim. FP16 buys nothing on a CPU and
-changes the outputs, so the export would no longer score like the .pt.
+FP32, dynamic height and width, simplified with onnxslim. FP16 buys nothing on
+a CPU and changes the outputs, so the export would no longer score like the .pt.
 
 The export is made from a copy in a temporary folder, checked with ONNX
 Runtime, and only then swapped into models/ - a failed export leaves the
@@ -72,21 +83,30 @@ def trained_imgsz(manifest_path: Path) -> int:
     return int(record["imgsz"])
 
 
-def check_export(path: Path, imgsz: int) -> None:
-    """Refuse an export that is not a fixed imgsz x imgsz pose model."""
+def check_export(path: Path) -> None:
+    """Refuse an export that is not a 3-channel pose model of dynamic size.
+
+    A static height or width is refused, whatever its value: that is the
+    export that letterboxes differently from the .pt and scores worse.
+    """
     import onnxruntime
 
     session = onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
-    shape = session.get_inputs()[0].shape
-    if list(shape) != [1, 3, imgsz, imgsz]:
-        raise ValueError(f"exported input shape is {shape}, expected [1, 3, {imgsz}, {imgsz}]")
+    shape = list(session.get_inputs()[0].shape)
+    expected = "[batch, 3, height, width] with dynamic height and width"
+    if len(shape) != 4 or shape[1] != 3:
+        raise ValueError(f"exported input shape is {shape}, expected {expected}")
+    if shape[0] != 1 and isinstance(shape[0], int):
+        raise ValueError(f"exported input shape is {shape}, expected {expected}")
+    if isinstance(shape[2], int) or isinstance(shape[3], int):
+        raise ValueError(f"exported input shape is {shape}: a static size, expected {expected}")
     task = session.get_modelmeta().custom_metadata_map.get("task")
     if task != "pose":
         raise ValueError(f"exported model says task={task!r}, expected 'pose'")
 
 
 def export_onnx(pt: Path, onnx_path: Path, imgsz: int) -> dict:
-    """Export `pt` to `onnx_path` at `imgsz`, FP32, and return the record.
+    """Export `pt` to `onnx_path` at `imgsz`, FP32, dynamic, and return the record.
 
     Writes nothing to `onnx_path` unless the export succeeded and checked out.
     """
@@ -112,10 +132,10 @@ def export_onnx(pt: Path, onnx_path: Path, imgsz: int) -> dict:
         copy = Path(work) / pt.name
         shutil.copy2(pt, copy)
         exported = Path(YOLO(str(copy), task="pose").export(
-            format="onnx", imgsz=imgsz, half=False, dynamic=False,
+            format="onnx", imgsz=imgsz, half=False, dynamic=True,
             simplify=True, batch=1, device="cpu",
         ))
-        check_export(exported, imgsz)
+        check_export(exported)
         opset = max((o.version for o in onnx.load(str(exported)).opset_import
                      if o.domain in ("", "ai.onnx")), default=None)
         staging = onnx_path.with_name(onnx_path.name + ".tmp")
@@ -129,6 +149,7 @@ def export_onnx(pt: Path, onnx_path: Path, imgsz: int) -> dict:
         "source_sha256": sha256(pt),
         "sha256": sha256(onnx_path),
         "imgsz": imgsz,
+        "dynamic": True,
         "precision": "fp32",
         "opset": opset,
         "simplified": True,

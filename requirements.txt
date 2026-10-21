@@ -20,7 +20,13 @@ torchvision==0.20.1+cu118
 # are for tools/export_onnx. Pinned because Ultralytics' runtime auto-install
 # is switched off. Deliberately NOT onnxruntime-gpu (it shares the onnxruntime
 # package folder and the two overwrite each other) and not openvino.
-onnxruntime==1.23.2
+# 1.20.1 rather than 1.23.2. Not the fix for the 0xC0000005 crashes on the CPU
+# path - those came from PyTorch initialising CUDA (backend/utils/cuda_env.py)
+# and 1.20.1 crashed the same. But 1.22 and later probe the graphics hardware
+# through DXGI/D3D12/DXCore at startup, which has crashed CPU-only users on
+# Windows machines without a display, and an industrial PC may run headless.
+# 1.20.1 scores identically on the v10 validation set.
+onnxruntime==1.20.1
 onnx==1.23.0
 onnxslim==0.1.96
 pygrabber==0.2; sys_platform == "win32"

@@ -189,7 +189,7 @@ def test_onnx_at_the_configured_size_loads(fake_ultralytics, monkeypatch, onnx_f
     assert len(loaded) == 1
     assert str(onnx_file) in loaded[0]
     assert "ONNX Runtime" in loaded[0]
-    assert "device cpu | imgsz 416" in loaded[0]
+    assert "device cpu (CUDA kept off) | imgsz 416" in loaded[0]
 
 
 def test_missing_onnx_is_not_a_config_error(fake_ultralytics, monkeypatch, tmp_path):

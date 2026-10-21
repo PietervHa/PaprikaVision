@@ -205,9 +205,14 @@ paprika:
     # an .onnx under the plain onnxruntime package always runs on the CPU. An
     # index with no such GPU stops the app at startup rather than quietly
     # running somewhere else.
+    # On the CPU the app keeps CUDA off for the whole process: on a machine with
+    # an NVIDIA driver, PyTorch merely asking for GPUs crashed the app minutes
+    # later (backend/utils/cuda_env.py). "auto" still has to ask PyTorch, so a
+    # machine with an NVIDIA driver that should run on the CPU must say "cpu".
     # model_path takes the .pt or its ONNX export (python -m tools.export_onnx).
-    # An .onnx has its input size baked in: imgsz must match the export or the
-    # app refuses to start.
+    # The export accepts any input size, but imgsz must match the size it was
+    # trained and exported at (the "onnx" record in models/paprika_pose.json)
+    # or the app refuses to start.
     device: "cpu"
     imgsz: 416
     # Below this, a landmark is treated as "positioned but not visible" rather

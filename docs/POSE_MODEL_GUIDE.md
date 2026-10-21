@@ -233,7 +233,7 @@ Paprika pose model warmed up for 900x1092 frames in NNN ms
 or, for the ONNX export on the CPU (see "GPU or CPU" below):
 
 ```
-Paprika pose model loaded: ...\models\paprika_pose.onnx | ONNX Runtime 1.23.2 (CPUExecutionProvider) | device cpu | imgsz 416
+Paprika pose model loaded: ...\models\paprika_pose.onnx | ONNX Runtime 1.20.1 (CPUExecutionProvider) | device cpu (CUDA kept off) | imgsz 416
 ```
 
 The warm-up runs one throwaway inference at startup, on a blank the size of
@@ -305,16 +305,21 @@ imgsz 416, median ms per frame (`python -m tools.bench_cpu_runtimes`):
 | PyTorch | CPU | 58–62 |
 | ONNX Runtime | CPU | 30–34 |
 
-The export scores the same as the `.pt` on
-`data/datasets/paprika_v10_416/val/images`:
+The export scores exactly like the `.pt` on
+`data/datasets/paprika_v10_416/val/images`, because it is dynamic: it gets the
+same rectangular letterbox as the `.pt` (a 900x1092 frame at 416 becomes
+352x416). A static 416x416 export squares every frame up and scored worse,
+which is why `export_onnx` refuses to produce one:
 
-| | `.pt` | `.onnx` |
-|---|---:|---:|
-| placed n | 174 | 173 |
-| median error | 3.4° | 3.4° |
-| p90 | 8.3° | 8.4° |
-| within 10° | 91% | 91% |
-| flipped | 0 | 0 |
+| | `.pt` | `.onnx` dynamic | `.onnx` static (old) |
+|---|---:|---:|---:|
+| placed n | 174 | 174 | 173 |
+| median error | 3.4° | 3.4° | 3.4° |
+| p90 | 8.3° | 8.3° | 8.4° |
+| within 10° | 91% | 91% | 91% |
+| within 20° | 100% | 100% | 99% |
+| worst | 18.0° | 18.0° | 21.8° |
+| flipped | 0 | 0 | 0 |
 
 CPU numbers do not transfer between machines: run `bench_cpu_runtimes` again on
 the IPC itself.
@@ -326,10 +331,12 @@ python -m tools.export_onnx
 ```
 
 It exports `models/paprika_pose.pt` to `models/paprika_pose.onnx` at the size
-recorded in `models/paprika_pose.json` (FP32), and records the export there
-under `"onnx"`, with the hashes of both files. Never copy an `.onnx` in by
-hand — one left over from an older model loads without complaint and runs the
-wrong weights.
+recorded in `models/paprika_pose.json` (FP32, dynamic height and width), and
+records the export there under `"onnx"`, with the hashes of both files. The
+export accepts any input size, so that record is where the app learns the size
+the model was trained and exported at. Never copy an `.onnx` in by hand — one
+left over from an older model loads without complaint and runs the wrong
+weights, and the app refuses one whose hash does not match the record.
 
 **Switch** in `config/default.yaml`, then restart:
 
@@ -350,6 +357,17 @@ wrong weights.
 so an `.onnx` always runs on the CPU. cuDNN benchmark mode only applies to a
 `.pt` on the GPU.
 
+**On the CPU, CUDA is kept off.** On a laptop with an NVIDIA driver the `.onnx`
+on the CPU crashed the app every 5-15 minutes (0xC0000005, event log naming
+`nvdxgdmal64.dll_unloaded`). PyTorch asking how many GPUs there are starts the
+driver, which unloads a component when it sees none and calls into it later.
+When the device resolves to the CPU the app makes `torch.cuda.is_available()`
+and `device_count()` report no GPU for the rest of the process, before
+Ultralytics loads the model; the loaded line says `device cpu (CUDA kept off)`.
+`"auto"` still has to ask PyTorch once to decide, so a machine with an NVIDIA
+driver that should run on the CPU must say `device: "cpu"`. Details in
+`backend/utils/cuda_env.py`.
+
 **Verify.** The `Paprika pose model loaded:` line in `data/logs/vision.log`
 names the file, the runtime, the device and imgsz — check it says what you
 meant. Then score the model the config now points at:
@@ -359,11 +377,21 @@ python -m tools.label_stems data\datasets\paprika_v10_416\val\images --score
 ```
 
 The app refuses to start, with one error, when the configuration cannot work:
-an `.onnx` exported at a different size than `imgsz`, or a CUDA index on a
-machine where the runtime has no such GPU. It never installs packages at
+an `.onnx` exported at a different size than `imgsz` (for a dynamic export, the
+size in its `"onnx"` record — a missing record, or one whose hash is not this
+file's, is refused too), or a CUDA index on a machine where the runtime has no
+such GPU. It never installs packages at
 runtime: Ultralytics' auto-install is switched off in the app and in every
 tool, so a missing package is an import error and `requirements.txt` is where
 it gets fixed.
+
+**If it crashes natively** (the window just disappears, `vision.log` stops
+mid-run), look in `data/logs/native_crash.log`. faulthandler appends every
+Python thread's stack there on an access violation, under a
+`=== started <time> pid <n> ===` header per start; the path is logged at
+startup. A fast-fail (0xC0000409) runs no handler and leaves nothing there:
+for that, the Windows event log (Application, "Application Error") names the
+faulting module.
 
 ---
 

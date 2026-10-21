@@ -26,6 +26,8 @@ and nothing downstream can tell the difference.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import threading
 import time
@@ -42,6 +44,7 @@ from backend.utils.logger import get_logger
 from backend.detection.paprika.classical import (
     EDGE_MARGIN_PX, REASON_EDGE_CLIPPED, colour_name,
 )
+from backend.utils.cuda_env import cuda_kept_off, keep_cuda_off
 from backend.utils.paths import project_path
 from backend.utils.ultralytics_env import disable_autoinstall
 
@@ -73,9 +76,11 @@ class PoseModelConfigError(RuntimeError):
 def onnx_input_size(path) -> Optional[tuple]:
     """(height, width) an ONNX export was built for, or None if it is dynamic.
 
-    An ONNX export has its input size baked in; predict letterboxes every frame
-    to exactly that, whatever imgsz says. Read through ONNX Runtime on the CPU
-    because that is the runtime the app uses anyway - nothing extra to install.
+    A static export has its input size baked in; predict letterboxes every
+    frame to exactly that, whatever imgsz says. tools/export_onnx makes dynamic
+    ones, whose size comes from the export record instead (onnx_export_imgsz).
+    Read through ONNX Runtime on the CPU because that is the runtime the app
+    uses anyway - nothing extra to install.
     """
     import onnxruntime
 
@@ -85,6 +90,46 @@ def onnx_input_size(path) -> Optional[tuple]:
     if not isinstance(height, int) or not isinstance(width, int):
         return None
     return height, width
+
+
+def _sha256(path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def onnx_export_imgsz(path) -> int:
+    """The imgsz a dynamic export was made at, from its record in the manifest.
+
+    A dynamic export accepts any input size, so the file itself no longer says
+    what size the model was trained for. tools/export_onnx records it under
+    "onnx" in the .json beside the model, with the export's sha256. A record
+    that is missing, or whose hash is not this file's, describes some other
+    export - its size cannot be trusted, so this refuses rather than guess.
+    """
+    path = Path(path)
+    manifest = path.with_suffix(".json")
+    fix = "Re-export it: python -m tools.export_onnx"
+    try:
+        record = json.loads(manifest.read_text(encoding="utf-8")).get("onnx")
+    except FileNotFoundError:
+        record = None
+    except (OSError, ValueError, AttributeError) as exc:
+        raise PoseModelConfigError(f"Cannot read the export record in {manifest}: {exc}")
+    if not isinstance(record, dict) or not record.get("imgsz"):
+        raise PoseModelConfigError(
+            f"{path} accepts any input size and {manifest.name} has no export "
+            f"record saying which size it was exported at. {fix}"
+        )
+    if record.get("sha256") != _sha256(path):
+        raise PoseModelConfigError(
+            f"The export record in {manifest} is for a different file than "
+            f"{path} (sha256 differs), so the size it was exported at is "
+            f"unknown. {fix}"
+        )
+    return int(record["imgsz"])
 
 
 def onnx_has_cuda() -> bool:
@@ -211,6 +256,11 @@ class PaprikaDetector:
             # whether a GPU is visible: without CUDA the flag does nothing.
             if not self._is_onnx and self._device_setting != "cpu":
                 self._set_cudnn_benchmark()
+            # Before Ultralytics asks torch about CUDA on the first predict: on
+            # a machine with an NVIDIA driver that crashed the process minutes
+            # later. See backend/utils/cuda_env.py.
+            if self._device == "cpu":
+                keep_cuda_off()
             from ultralytics import YOLO
 
             # task is never left to Ultralytics. For an .onnx it guesses from
@@ -240,10 +290,13 @@ class PaprikaDetector:
         Runtime must have a CUDA provider, not just torch seeing a card. An
         explicit index with no such GPU is a config error: quietly running on
         the CPU instead would hide a machine that is not what the config says.
+
+        "cpu" returns before anything asks about GPUs: asking initialises CUDA,
+        which is what keep_cuda_off exists to prevent. "auto" has to ask.
         """
-        usable = cuda_device_count() if not self._is_onnx or onnx_has_cuda() else 0
         if self._device_setting == "cpu":
             return "cpu"
+        usable = cuda_device_count() if not self._is_onnx or onnx_has_cuda() else 0
         if self._device_setting == "auto":
             return "0" if usable else "cpu"
         if int(self._device_setting) >= usable:
@@ -256,14 +309,30 @@ class PaprikaDetector:
         return self._device_setting
 
     def _check_onnx_size(self) -> None:
-        """Refuse an .onnx exported at a different size than paprika.pose.imgsz."""
+        """Refuse an .onnx exported at a different size than paprika.pose.imgsz.
+
+        A static export carries its size in its input shape. A dynamic one runs
+        at any size, so the size it was trained and exported at comes from its
+        export record - running it at another imgsz would load fine and quietly
+        score worse.
+        """
         size = onnx_input_size(self._model_path)
-        if size is not None and size != (self._imgsz, self._imgsz):
+        if size is None:
+            exported = onnx_export_imgsz(self._model_path)
+            if exported != self._imgsz:
+                raise PoseModelConfigError(
+                    f"{self._model_path} was exported at imgsz {exported} (its "
+                    f"export record) but paprika.pose.imgsz is {self._imgsz}. "
+                    f"Run the model at the size it was trained and exported at: "
+                    f"set paprika.pose.imgsz to {exported}."
+                )
+            return
+        if size != (self._imgsz, self._imgsz):
             raise PoseModelConfigError(
                 f"{self._model_path} was exported for {size[1]}x{size[0]} input but "
-                f"paprika.pose.imgsz is {self._imgsz}. An ONNX export has a fixed "
-                f"input size: re-export it (python -m tools.export_onnx) or set "
-                f"paprika.pose.imgsz to {size[0]}."
+                f"paprika.pose.imgsz is {self._imgsz}. This is a static export, "
+                f"fixed to that size: re-export it (python -m tools.export_onnx) "
+                f"or set paprika.pose.imgsz to {size[0]}."
             )
 
     def _runtime_name(self) -> str:
@@ -281,7 +350,7 @@ class PaprikaDetector:
 
     def _device_name(self) -> str:
         if self._device in (None, "cpu"):
-            return "cpu"
+            return "cpu (CUDA kept off)" if cuda_kept_off() else "cpu"
         try:
             import torch
 
