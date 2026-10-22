@@ -1,58 +1,40 @@
 """
 Database Layer
 
-SQL storage for vision inspection results, via SQLAlchemy Core. The point
-of using SQLAlchemy instead of raw sqlite3/pyodbc calls is portability:
-this module works unchanged against SQLite today and against MSSQL later —
-only `database.url` in config.yaml needs to change.
+SQL storage for vision results, via SQLAlchemy Core, so the same code works
+against SQLite today and MSSQL later - only `database.url` in the config
+changes.
 
-    config.yaml:
-        database:
-          url: "sqlite:///data/results.db"
-          # later, once a server is available:
-          # url: "mssql+pyodbc://user:password@server/db?driver=ODBC+Driver+17+for+SQL+Server"
+    database:
+      url: "sqlite:///data/results.db"
+      # url: "mssql+pyodbc://user:password@server/db?driver=ODBC+Driver+17+for+SQL+Server"
 
-Schema design: different detection backends (OCR, template matching,
-classifier, YOLO, Roboflow) each log their own extra fields
-(searched_word, match_score, best_reference, label, count, ...). Rather
-than giving every possible field its own nullable column — which means a
-schema migration every time a backend changes — this module keeps a fixed
-set of columns for whatever the analytics dashboard and exports need to
-filter/aggregate on, and stores everything else as a JSON blob in
-`details`. Nothing is lost; nothing needs to change when a backend adds a
-new field.
+A fixed set of columns holds what is worth filtering on; everything else on a
+result dict (detections, primary, timing, ...) goes into the `details` JSON
+blob, so a new field in the result never needs a schema migration.
 
-NOTE for the MSSQL migration later: this has only been tested against
-SQLite. Two things worth double-checking once a real MSSQL server is
-available:
-  - `pyodbc` (or `pymssql`) needs to be installed, plus the matching ODBC
-    driver on the machine running this.
-  - The `DateTime` columns here map to MSSQL's plain DATETIME type
-    (~3.33ms precision). The JSONL history has microsecond timestamps; if
-    that precision matters, switch to `mssql.DATETIME2` for those columns.
+NOTE for a later MSSQL migration: install pyodbc plus the ODBC driver, and
+consider mssql.DATETIME2 if the JSONL's microsecond timestamps matter (plain
+DATETIME is ~3.33 ms).
 """
 from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any, Optional
 
 from sqlalchemy import (
     Column,
     DateTime,
     Float,
-    ForeignKey,
     Index,
     Integer,
     MetaData,
     String,
     Table,
     Text,
-    and_,
     create_engine,
-    func,
-    select,
 )
 from sqlalchemy.engine import Engine
 
@@ -61,13 +43,7 @@ from backend.utils.paths import project_path
 
 log = logging.getLogger(__name__)
 
-# Fields that get their own column. Everything else on a result dict is
-# folded into the `details` JSON blob — see module docstring. Exception:
-# for "ocread" results only, "detections" is excluded from that blob and
-# gets its own row per item in `result_detections` instead (see below), so
-# text/confidence pairs can be queried and sorted directly in SQL instead of
-# being buried in JSON. "ocr" and "object_detection" results are unaffected
-# and keep their detections inside `details`, same as before this existed.
+# Fields that get their own column. Everything else goes into `details`.
 _CORE_FIELDS = {
     "timestamp",
     "status",
@@ -95,25 +71,6 @@ results_table = Table(
     Index("ix_results_timestamp", "timestamp"),
 )
 
-# One row per recognized text item belonging to an "ocread"-mode result in
-# `results`. Split out into its own table instead of living inside the
-# `details` JSON blob so text and confidence can each be queried, filtered,
-# and sorted directly in SQL - e.g. "how accurate are reads of this
-# particular text" - rather than having to parse JSON for every row first.
-# Only "ocread" results get rows here; "ocr" and "object_detection" results
-# still store their detections inside `details`, unchanged.
-result_detections_table = Table(
-    "result_detections",
-    metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("result_id", Integer, ForeignKey("results.id", ondelete="CASCADE"), nullable=False),
-    Column("detection_index", Integer, nullable=False),  # original position within the result's detections list
-    Column("text", Text, nullable=True),
-    Column("confidence", Float, nullable=True),
-    Index("ix_result_detections_result_id", "result_id"),
-    Index("ix_result_detections_confidence", "confidence"),
-    Index("ix_result_detections_text", "text"),
-)
 
 def _resolve_sqlite_url(url: str) -> str:
     """Resolve relative sqlite:/// paths against the repo root, like every other path in this project."""
@@ -162,18 +119,8 @@ def _safe_float(value: Any) -> Optional[float]:
 
 
 def _row_from_result(result: dict) -> dict:
-    """
-    Build the DB row dict for one result. Shared by insert_result() and the
-    migration script's bulk insert.
-
-    "detections" is only pulled out of the `details` blob for "ocread"
-    results (see `_detection_rows`); "ocr" and "object_detection" results
-    keep storing their detections inside `details` exactly as before.
-    """
-    exclude = set(_CORE_FIELDS)
-    if result.get("mode") == "ocread":
-        exclude.add("detections")
-    details = {k: v for k, v in result.items() if k not in exclude}
+    """Build the DB row dict for one result."""
+    details = {k: v for k, v in result.items() if k not in _CORE_FIELDS}
     return {
         "timestamp": _parse_timestamp(result.get("timestamp")),
         "status": result.get("status") or "NOK",
@@ -186,124 +133,8 @@ def _row_from_result(result: dict) -> dict:
     }
 
 
-def _detection_rows(result_id: int, result: dict) -> list[dict]:
-    """
-    Build one `result_detections` row per item in an "ocread" result's
-    detections list (text + confidence, individually queryable/sortable in
-    SQL). Only "ocread" results are broken out this way - "ocr" and
-    "object_detection" results are unaffected and keep their detections
-    inside the `details` JSON blob, same as before this feature existed.
-    """
-    if result.get("mode") != "ocread":
-        return []
-    detections = result.get("detections")
-    if not isinstance(detections, list):
-        return []
-    rows = []
-    for idx, d in enumerate(detections):
-        if not isinstance(d, dict):
-            continue
-        rows.append({
-            "result_id": result_id,
-            "detection_index": idx,
-            "text": d.get("text"),
-            "confidence": _safe_float(d.get("confidence")),
-        })
-    return rows
-
-
 def insert_result(result: dict) -> None:
-    """
-    Insert one inspection result. For "ocread" results, also insert one
-    `result_detections` row per detected text (text/confidence split out so
-    they can be queried and sorted directly in SQL); "ocr" and
-    "object_detection" results are stored exactly as before this feature was
-    added, with their detections inside the `details` blob. Same `result`
-    dict shape as the JSONL writer expects.
-    """
+    """Insert one vision result. Same `result` dict shape as the JSONL writer expects."""
     row = _row_from_result(result)
     with engine.begin() as conn:
-        inserted = conn.execute(results_table.insert().values(**row))
-        result_id = inserted.inserted_primary_key[0]
-
-        det_rows = _detection_rows(result_id, result)
-        if det_rows:
-            conn.execute(result_detections_table.insert(), det_rows)
-
-
-def _date_bounds(start: date, end: date) -> tuple[datetime, datetime]:
-    return datetime.combine(start, datetime.min.time()), datetime.combine(end, datetime.max.time())
-
-
-def query_summary(start: date, end: date) -> list[dict]:
-    """
-    Lightweight query for the analytics dashboard: timestamp/status/
-    processing_time_ms only, no `details` blob. Used on every dashboard
-    refresh, so keep it cheap.
-    """
-    start_dt, end_dt = _date_bounds(start, end)
-    cols = results_table.c
-    stmt = (
-        select(cols.timestamp, cols.status, cols.processing_time_ms)
-        .where(and_(cols.timestamp >= start_dt, cols.timestamp <= end_dt))
-        .order_by(cols.timestamp)
-    )
-    with engine.connect() as conn:
-        rows = conn.execute(stmt).mappings().all()
-    return [dict(r) for r in rows]
-
-
-def query_full(start: date, end: date) -> list[dict]:
-    """
-    Full query for exports: every core column plus `details` parsed back
-    out to individual keys, so an exported row looks like the original
-    JSONL record again. For "ocread" results, `detections` is reattached
-    from `result_detections` instead of `details` (that's where it's
-    stored for that mode - see `insert_result`); "ocr" and
-    "object_detection" results already have `detections` in `details` and
-    are unaffected. Either way an export row ends up with the same
-    "detections": [{"text":..., "confidence":...}] shape as before.
-    """
-    start_dt, end_dt = _date_bounds(start, end)
-    cols = results_table.c
-    stmt = (
-        select(results_table)
-        .where(and_(cols.timestamp >= start_dt, cols.timestamp <= end_dt))
-        .order_by(cols.timestamp)
-    )
-    with engine.connect() as conn:
-        rows = conn.execute(stmt).mappings().all()
-
-        result_ids = [row["id"] for row in rows]
-        detections_by_result_id: dict[int, list[dict]] = {}
-        if result_ids:
-            det_cols = result_detections_table.c
-            det_stmt = (
-                select(det_cols.result_id, det_cols.text, det_cols.confidence)
-                .where(det_cols.result_id.in_(result_ids))
-                .order_by(det_cols.result_id, det_cols.detection_index)
-            )
-            for det_row in conn.execute(det_stmt).mappings().all():
-                detections_by_result_id.setdefault(det_row["result_id"], []).append(
-                    {"text": det_row["text"], "confidence": det_row["confidence"]}
-                )
-
-    results = []
-    for row in rows:
-        row = dict(row)
-        result_id = row["id"]
-        item = {k: v for k, v in row.items() if k not in ("id", "details")}
-        if isinstance(item.get("timestamp"), datetime):
-            item["timestamp"] = item["timestamp"].isoformat()
-        details_raw = row.get("details")
-        if details_raw:
-            try:
-                item.update(json.loads(details_raw))
-            except (TypeError, json.JSONDecodeError):
-                pass
-        if result_id in detections_by_result_id:
-            item["detections"] = detections_by_result_id[result_id]
-        results.append(item)
-    return results
-
-
+        conn.execute(results_table.insert().values(**row))
