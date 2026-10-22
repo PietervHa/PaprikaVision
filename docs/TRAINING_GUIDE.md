@@ -166,8 +166,8 @@ python -m tools.export_dataset data/raw
 python -m tools.export_dataset data/raw --out data/datasets/paprika --val 0.2
 ```
 
-Merges your clicks over `pre_annotate.py`'s automatic guesses. **A hand label
-always wins** — the pre-annotator finds stems by colour, so it is strong
+Merges your clicks over the classical detector's automatic guesses. **A hand
+label always wins** — the classical detector finds stems by colour, so it is strong
 exactly where you are weak and absent exactly where you are strong.
 
 Fruit with no landmark from either source are written with visibility 0 rather

@@ -263,11 +263,6 @@ shape on red rather than picking one.
 
 ### Speed
 
-```
-python -m tools.bench_pose --device cuda:0
-python -m tools.bench_pose --device cuda:0 --cudnn-benchmark
-```
-
 On a Quadro M1200, 900x1092 frames, median ms:
 
 | imgsz | benchmark off | benchmark on |
@@ -289,15 +284,14 @@ under 40 ms and 416 is close.
 The rest still holds on the GPU: framework overhead is 0.1 ms, so ONNX and
 TensorRT have nothing to remove there, `half=True` does nothing below compute 7.0, and no
 architecture in the family is faster. A smaller imgsz needs a model trained at
-that size; see `tools/bench_pose`. Re-run this if you change GPU, model or
-image size.
+that size. Re-measure if you change GPU, model or image size.
 
 ### GPU or CPU
 
 The line will probably run on an industrial PC that may have no NVIDIA card,
 so the CPU route is the likely production path. On the CPU the model runs best
 as an ONNX export under ONNX Runtime. i7-7820HQ + Quadro M1200, model v10,
-imgsz 416, median ms per frame (`python -m tools.bench_cpu_runtimes`):
+imgsz 416, median ms per frame:
 
 | runtime | device | median ms |
 |---|---|---:|
@@ -321,8 +315,8 @@ which is why `export_onnx` refuses to produce one:
 | worst | 18.0° | 18.0° | 21.8° |
 | flipped | 0 | 0 | 0 |
 
-CPU numbers do not transfer between machines: run `bench_cpu_runtimes` again on
-the IPC itself.
+CPU numbers do not transfer between machines: measure again on the IPC
+itself.
 
 **Make the export.** `retrain` does this whenever it installs a model; by hand:
 

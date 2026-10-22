@@ -209,16 +209,16 @@ Two things that change the plan, measured rather than assumed.
 **The blue belt is worth a lot.** Fruit and belt separate on hue alone: the belt
 sits tightly at hue 100-125, all fruit falls outside it, and the pale edge
 strips drop out on saturation. Segmentation succeeded on 160 of 160 images, 243
-fruit. That is why **all bounding boxes are free** - let `tools/pre_annotate.py`
-generate them rather than drawing them by hand.
+fruit. That is why **all bounding boxes are free** - `tools/export_dataset.py`
+generates them from the classical detector, so you never draw them by hand.
 
 **The shape estimator does not work on blocky paprika, and that changes what the
 model has to learn.** The idea was that the stem end sits on the wider shoulder,
 so the silhouette could settle which end is which on a fruit with no stem.
 Across 87 fruit with a visible stem that holds in 66% of cases, median signal
 strength 0.074, median elongation 1.33. Too round and too symmetric. So
-`shape_crosscheck` is off, and the pre-annotation guesses no keypoint on the
-basis of shape.
+`shape_crosscheck` is off, and the automatic detection guesses no keypoint on
+the basis of shape.
 
 What that means for you: the model has to learn the difference between stem end
 and blossom end from **fine detail** - the calyx scar, the lobe pattern

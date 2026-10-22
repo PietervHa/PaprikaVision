@@ -200,9 +200,8 @@ def test_shape_orientation_rescues_a_symmetric_fruit_via_its_stem():
 
 def test_shape_orientation_without_a_stem_is_unaffected():
     """detect_protrusion=False must reproduce the original width-profile-only
-    behaviour exactly, so the two routes can still be compared directly (see
-    tools/tune_shape.py) and nothing here silently changes a stemless
-    fruit's answer."""
+    behaviour exactly, so the two routes can still be compared directly and
+    nothing here silently changes a stemless fruit's answer."""
     image, _, _ = render_paprika(30, color=COLORS["green"])
     mask = orient.segment_fruit(image)
     with_detection = orient.shape_orientation(mask)

@@ -9,12 +9,12 @@ dataset of nothing but the cases the detector already fails on, and a model
 trained only on hard examples loses the easy ones it used to get right.
 
 Merges the landmarks clicked with tools/label_stems.py over the automatic
-guesses from tools/pre_annotate.py, and writes a dataset ultralytics can train
-on directly.
+guesses from the classical detector (backend/detection/paprika/classical.py),
+and writes a dataset ultralytics can train on directly.
 
 The merge rule, and why it is this way round
 --------------------------------------------
-A hand label always wins. The pre-annotator is honest about what it can and
+A hand label always wins. The classical detector is honest about what it can and
 cannot do - it finds the stem by colour, which works on red, orange and yellow
 fruit and fails by definition on green, where stem and flesh share a hue. Those
 are exactly the fruit that end up hand-labelled, so the two sources are
@@ -28,7 +28,7 @@ keypoints over a separate stem class - and deleting those examples would teach
 the model that every fruit has a visible stem.
 
 Matching is by position. A hand label carries the bbox it was clicked in, and
-is attached to whichever pre-annotated fruit overlaps it most. Nothing here
+is attached to whichever automatically detected fruit overlaps it most. Nothing here
 relies on detection ORDER, which changes whenever the detector is tuned.
 
 Splitting is by FRAME, never by fruit
@@ -71,8 +71,8 @@ CALYX_KEY = "stem_xy"
 BLOSSOM_KEY = "blossom_xy"
 
 # COCO/YOLO visibility. 2 = visible and labelled, 1 = labelled but occluded,
-# 0 = not labelled. Kept identical to tools/pre_annotate.py so a merged row is
-# indistinguishable from an automatic one.
+# 0 = not labelled. Hand-labelled and automatic rows use the same values, so a
+# merged row is indistinguishable from an automatic one.
 VIS_VISIBLE, VIS_OCCLUDED, VIS_ABSENT = 2, 1, 0
 
 
@@ -349,7 +349,7 @@ def export(args) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Merge hand labels over pre-annotation into a YOLO-pose "
+        description="Merge hand labels over automatic detection into a YOLO-pose "
                     "dataset. Source frames are only ever read and copied."
     )
     parser.add_argument("frames", nargs="*",

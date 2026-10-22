@@ -2,9 +2,9 @@
 Classical paprika detection: fruit, stem and calyx without a model
 
 Shared by the `shape` backend in pose_detector.py and by
-tools/pre_annotate.py, so the runtime and the pre-annotation are guaranteed to
-see the same thing. If the two drifted apart you would be annotating a dataset
-against a different definition from the one the machine applies.
+tools/export_dataset.py, so the runtime and the dataset export are guaranteed
+to see the same thing. If the two drifted apart you would be annotating a
+dataset against a different definition from the one the machine applies.
 
 Segmentation: hue, not saturation
 ---------------------------------
@@ -40,7 +40,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-# Calibrated on the real line. Re-check with tools/tune_shape.py.
+# Calibrated on the real line. Re-check with tools/diagnose_frames.py --masks.
 DEFAULT_BELT_HUE = (96, 145)
 DEFAULT_SATURATION_FLOOR = 80
 DEFAULT_VALUE_FLOOR = 45

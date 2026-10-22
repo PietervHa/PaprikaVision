@@ -208,10 +208,8 @@ def axis_difference(a: float, b: float) -> float:
     opposite ends of the fruit, maximally different. An axis has no ends: a
     groove reading of 175 and a keypoint direction of 10 describe the same
     line through the fruit, not a near-180-degree disagreement. Reuses
-    `angular_difference` rather than a second formula, so the runtime
-    cross-check and the offline scorer in `tools/eval_estimators.py` (which
-    delegates its own `axis_error_deg` here) cannot drift onto two different
-    definitions of "how far apart are two axes" - the same reason
+    `angular_difference` rather than a second formula, so every caller
+    shares one definition of "how far apart are two axes" - the same reason
     `vector_to_angle` was pulled out on its own below.
     """
     diff = angular_difference(a, b)
@@ -352,9 +350,9 @@ def segment_fruit(
                           Set to (0, 0) on a neutral belt to fall back to
                           saturation alone. Verify on your own line by
                           sampling belt pixels in HSV (OpenCV hue is 0-179,
-                          not 0-359); tools/tune_shape.py writes
-                          fruit | mask | overlay montages that show directly
-                          whether the belt is being excluded.
+                          not 0-359); tools/diagnose_frames.py --masks
+                          writes the masks, which show directly whether the
+                          belt is being excluded.
         value_floor:      minimum brightness, to drop shadow.
 
     Returns:
@@ -485,7 +483,7 @@ def shape_orientation(
                            body having a taper.
         detect_protrusion: set False to measure the raw mask exactly as the
                            original width-profile-only version did - useful
-                           for comparing the two directly in tools/tune_shape.py.
+                           for comparing the two directly.
 
     Returns:
         An Orientation carrying angles only - no positions - so nothing here
@@ -619,8 +617,8 @@ def shape_orientation(
             # rather than 0.0 because reaching this point already required
             # stem_by_morphology's own two-of-three kernel-scale agreement -
             # this is additional evidence on top of that, not the only
-            # evidence. Re-check with tools/tune_shape.py once labelled
-            # angles exist for real crops, the same way the 4.0 below was.
+            # evidence. Re-check once labelled angles exist for real crops,
+            # the same way the 4.0 below was.
             result.confidence = float(
                 np.clip(0.5 + 0.5 * min(1.0, protrusion_offset_ratio), 0.0, 1.0)
             )
@@ -668,8 +666,7 @@ def shape_orientation(
     # averaging over the end 30% of the length deliberately blunts the
     # extremes. Scaling by 4 puts that clear-cut case near 0.68, comfortably
     # above shape_flip_override, while a near-symmetric fruit still lands
-    # around 0.1. Re-check this against real masks once the dataset lands:
-    # tools/tune_shape.py prints `combined` per image for exactly this.
+    # around 0.1. Re-check this against real masks once the dataset lands.
     result.flip_confidence = float(np.clip(abs(combined) * 4.0, 0.0, 1.0))
 
     if protrusion is not None:
@@ -801,8 +798,7 @@ def groove_crosscheck(
 
     Agreement is recorded (`groove_agreement_deg`, a "groove_agrees" note)
     but does NOT raise confidence the way disagreement lowers it: a groove
-    reading carries its own few-degree noise even at good coherence (see the
-    "GROOVE AXIS BY COHERENCE" table `tools/eval_estimators.py` prints), so
+    reading carries its own few-degree noise even at good coherence, so
     landing close to the settled axis is milder evidence than landing far
     from it is - rewarding it the same amount either direction would let a
     merely-average groove reading manufacture confidence the estimators

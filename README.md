@@ -97,13 +97,14 @@ shape estimator (it thresholds on absolute saturation) *and* the training set,
 by teaching the model that a paprika's appearance is inherently unstable.
 Re-collecting 2000 images costs far more than doing this now.
 
-**2. Tune the belt threshold.**
+**2. Check the belt threshold.**
 ```powershell
-python -m tools.tune_shape --live --frames 12
+python -m tools.diagnose_frames data/raw --masks
 ```
-Sweeps `saturation_floor` and writes `fruit | mask | overlay` montages to
-`data/debug/tune_shape/`. Pick the value that maximises the stem-end signal,
-not the detection count — finding a blob is easy.
+Writes the segmentation masks to `data/debug/diagnose/`. Check that the belt
+drops out and the stem end survives; if not, adjust `saturation_floor` and run
+it again. Judge by the stem-end signal, not the detection count — finding a
+blob is easy.
 
 **3. Fix the angle convention.** Set `backend: "simulator"`, watch the PLC
 against the HMI. Because the true angle is known exactly, any mismatch is
@@ -186,7 +187,7 @@ backend/
 frontend/                FastAPI + HMI (angle dial, confidence meters)
 tools/
   dataset_check.py       validate an export before training
-  tune_shape.py          calibrate saturation_floor against the real belt
+  diagnose_frames.py     run the real pipeline on frames and explain each result
 docs/ANNOTATION_SPEC.md  read this before labelling
 ```
 
@@ -200,7 +201,7 @@ the wrong end and the silhouette overrules them.
 - The `shape` backend cannot separate two touching paprikas — they segment as
   one blob and the axis lands between them. `pose` is what fixes that.
 - `shape` needs a belt markedly less saturated than the fruit. Verify with
-  `tune_shape` before relying on it.
+  `diagnose_frames --masks` before relying on it.
 - Standing fruit gives no angle by design. If the infeed produces a lot of
   them, that's a mechanical problem to solve upstream, not a vision one.
 - Angles are measured in the frame as displayed. If you change
