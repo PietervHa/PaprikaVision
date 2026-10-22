@@ -214,7 +214,7 @@ paprika:
     # trained and exported at (the "onnx" record in models/paprika_pose.json)
     # or the app refuses to start.
     device: "cpu"
-    imgsz: 416
+    imgsz: 320
     # Below this, a landmark is treated as "positioned but not visible" rather
     # than discarded. That distinction is what lets the engine tell a fruit
     # standing stem-down from one it simply failed on, so do not set it so high

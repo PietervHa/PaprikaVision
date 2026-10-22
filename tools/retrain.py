@@ -275,6 +275,51 @@ def record_run(run_dir: Path, root: Path) -> int:
     return 0
 
 
+def write_provenance(produced: Path, live: Path, record: dict) -> Path:
+    """Write MANIFEST.json into the run and copy it beside the installed weights.
+
+    Must run BEFORE scoring. The .json beside the model carries the "onnx"
+    record the detector checks the .onnx against by sha256; while it still
+    held the previous model's record, the detector refused the fresh export
+    and the score step failed.
+    """
+    manifest = produced / "MANIFEST.json"
+    manifest.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    shutil.copy2(manifest, live.with_suffix(".json"))
+    return manifest
+
+
+def go_back_instructions(backup: Path | None, onnx_backup: Path | None,
+                         json_backup: Path | None) -> list[str]:
+    """How to put the previous model back, as a set that still matches.
+
+    The .pt, the .onnx and the .json travel together: restoring the first two
+    alone leaves a json whose export record no longer matches the .onnx, and
+    the app refuses to start.
+    """
+    if backup is None:
+        return []
+    lines = [f"To go back:  copy {backup.name} models\\paprika_pose.pt"]
+    if json_backup is not None:
+        lines.append(f"        and  copy {json_backup.name} models\\paprika_pose.json")
+    else:
+        # The json now describes the NEW model; export_onnx would read its
+        # imgsz, and --trace its lineage, for the old weights.
+        lines.append("        then delete models\\paprika_pose.json - it describes "
+                     "the new model -")
+        lines.append("             and write one for the old weights: "
+                     "python -m tools.retrain --record <its run dir>")
+    if onnx_backup is not None and json_backup is not None:
+        lines.append(f"        and  copy {onnx_backup.name} models\\paprika_pose.onnx")
+    else:
+        # No matching .onnx + record pair to restore: a fresh export rebuilds
+        # the .onnx and its record from the restored .pt.
+        lines.append("        then python -m tools.export_onnx")
+        lines.append("             (re-exports the .onnx and rewrites its record "
+                     "in models\\paprika_pose.json)")
+    return lines
+
+
 def newest_run(runs_root: Path, after: float) -> Path | None:
     """The training run created by this invocation, not whichever is newest.
 
@@ -509,7 +554,8 @@ def main() -> int:
           "the result.")
     live = project_path("models/paprika_pose.pt")
     live_onnx = live.with_suffix(".onnx")
-    backup = onnx_backup = None
+    live_json = live.with_suffix(".json")
+    backup = onnx_backup = json_backup = None
     if live.exists():
         backup = live.with_name(
             f"paprika_pose_before_{args.name}_{started:%Y%m%d_%H%M%S}.pt"
@@ -522,6 +568,12 @@ def main() -> int:
         )
         shutil.copy2(live_onnx, onnx_backup)
         print(f"current ONNX export backed up to {onnx_backup.name}")
+    if live_json.exists():
+        json_backup = live_json.with_name(
+            f"paprika_pose_before_{args.name}_{started:%Y%m%d_%H%M%S}.json"
+        )
+        shutil.copy2(live_json, json_backup)
+        print(f"current manifest backed up to {json_backup.name}")
 
     shutil.copy2(candidate, live)
 
@@ -548,10 +600,9 @@ def main() -> int:
         print("   not the model just installed - the score below measures THAT "
               "file, not this run.")
 
-    run([sys.executable, "-m", "tools.label_stems", str(val_images),
-         "--score", "--worst", "10"], False, root)
-
-    # 5. provenance --------------------------------------------------------
+    # Provenance before the score: the detector checks the .onnx against the
+    # "onnx" record in the .json, so the json must already describe this
+    # export when label_stems loads it.
     try:
         commit = subprocess.check_output(
             ["git", "rev-parse", "--short", "HEAD"], cwd=str(root)
@@ -559,8 +610,7 @@ def main() -> int:
     except Exception:
         commit = "unknown"
     dataset_manifest = dm.read(out_dir) or {}
-    manifest = produced / "MANIFEST.json"
-    manifest.write_text(json.dumps({
+    manifest = write_provenance(produced, live, {
         "created": started.isoformat(timespec="seconds"),
         "dataset": str(out_dir),
         "dataset_id": dataset_manifest.get("content_id"),
@@ -575,18 +625,18 @@ def main() -> int:
         "git_commit": commit,
         "replaced": str(backup) if backup else None,
         "onnx": onnx_record,
-    }, indent=2), encoding="utf-8")
-    shutil.copy2(manifest, live.with_suffix(".json"))
+    })
     print(f"\nprovenance written to {manifest} and beside the installed weights")
+
+    run([sys.executable, "-m", "tools.label_stems", str(val_images),
+         "--score", "--worst", "10"], False, root)
 
     if not args.install and not args.force_install:
         print("\nThe new model is installed for scoring only.")
         print("Read the numbers above against the model you had. To keep it, "
               "nothing more is needed.")
-        if backup:
-            print(f"To go back:  copy {backup.name} models\\paprika_pose.pt")
-        if onnx_backup:
-            print(f"        and  copy {onnx_backup.name} models\\paprika_pose.onnx")
+        for line in go_back_instructions(backup, onnx_backup, json_backup):
+            print(line)
     return 0
 
 
