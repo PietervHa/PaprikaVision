@@ -28,3 +28,4 @@ runs/
 /models/paprika_pose_before_v12_416_20261022_155020.json
 /models/paprika_pose_before_v12_416_20261022_155020.onnx
 /config/v10_check.yaml
+/config/thr045.yaml

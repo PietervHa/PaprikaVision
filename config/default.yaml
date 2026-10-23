@@ -726,7 +726,7 @@ capture:
   # Anything the keyboard package understands: "c", "f12", "ctrl+shift+s".
   # Avoid "q" - that is the manual vision trigger.
   hotkey: "c"
-  directory: "data/captures"
+  directory: "data/datasets/holdout_live2"
   save_result_json: true
 
   # png or jpg. Default png, and measured rather than assumed: these frames are
