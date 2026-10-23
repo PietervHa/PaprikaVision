@@ -242,7 +242,7 @@ paprika:
     # nothing to measure. The robot cannot pick up an upside-down paprika and
     # turn it over, so returning a number would imply an action that does not
     # exist. The PLC simply gets NOK.
-    min_angle_confidence: 0.90
+    min_angle_confidence: 0.45
 
     # Floor below which no angle is reported at all.
     #
