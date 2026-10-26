@@ -64,7 +64,7 @@ def _enable_crash_trace(logs_dir=None):
 
 
 def _process_vision_result(result, trigger_time, app_state):
-    """Record a completed cycle: state, counters, database, JSONL."""
+    """Record a completed cycle: state, database, JSONL."""
     try:
         cycle_time_ms = round((time.perf_counter() - trigger_time) * 1000, 1)
         primary = result.get("primary") or {}
@@ -73,9 +73,6 @@ def _process_vision_result(result, trigger_time, app_state):
         result_dict = {**result, "cycle_time_ms": cycle_time_ms}
         app_state.update_result(result_dict)
         orientation = primary.get("orientation") or {}
-        app_state.increment_counter(
-            result.get("status", "NOK"), placement, str(orientation.get("pose", ""))
-        )
 
         try:
             save_result(result_dict)
@@ -133,7 +130,7 @@ def _live_result(app_state) -> dict:
     overlay = app_state.get_overlay(now=_time.time())
     if not overlay.get("stale") and overlay.get("detections"):
         return {
-            "status": "OK",
+            "status": "OK" if (overlay.get("primary") or {}).get("placement") == "place" else "NOK",
             "detections": overlay.get("detections") or [],
             "primary": overlay.get("primary"),
             "processing_time_ms": overlay.get("scan_ms"),

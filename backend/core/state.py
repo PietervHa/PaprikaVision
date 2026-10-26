@@ -13,37 +13,6 @@ from backend.core.config_loader import cfg
 
 VALID_VISION_MODES = ("paprika", "idle")
 
-# Poses counted individually, because each points at a different thing to go
-# and fix: upside_down at the infeed, incomplete at the camera framing or the
-# trigger timing, stem_not_found at the stem detector, the lighting or the
-# cultivar, standing_stem_up/down at the infeed tipping fruit onto an end
-# instead of its side. All five are rejected the same way; only the reason
-# differs, and the reason is the whole point of counting them apart.
-COUNTED_POSES = (
-    "upside_down",
-    "stem_not_found",
-    "incomplete",
-    "standing_stem_up",
-    "standing_stem_down",
-)
-
-# One definition, used both to initialise and to reset. Two literal dicts is
-# how a counter gets added in one place and then silently resurrects itself
-# with a stale set of keys in the other.
-_EMPTY_COUNTERS = {
-    "ok": 0,
-    "nok": 0,
-    "total": 0,
-    "reorient": 0,
-    "reject": 0,
-    # Counted apart from reject: a review is a fruit the machine could not
-    # measure, not one it measured and turned down. A rising review count means
-    # go and look at the detector; a rising reject count means go and look at
-    # the fruit.
-    "review": 0,
-    **{pose: 0 for pose in COUNTED_POSES},
-}
-
 
 class AppState:
     def __init__(self):
@@ -56,7 +25,6 @@ class AppState:
             "primary": None,
             "processing_time_ms": 0,
         }
-        self.counters = dict(_EMPTY_COUNTERS)
 
         self.vision_mode = str(cfg.get("vision_mode", "paprika"))
         self.camera_rotation = 0
@@ -85,30 +53,10 @@ class AppState:
         with self.lock:
             self.latest_result = result
 
-    def increment_counter(self, status: str, placement: str = "", pose: str = ""):
-        with self.lock:
-            self.counters["total"] += 1
-            if status == "OK":
-                self.counters["ok"] += 1
-            else:
-                self.counters["nok"] += 1
-            if placement in ("reorient", "reject", "review"):
-                self.counters[placement] += 1
-            # See COUNTED_POSES: these are counted apart because they are
-            # different problems with different fixes, not because the machine
-            # treats them differently - it does not.
-            if pose in COUNTED_POSES:
-                self.counters[pose] += 1
-
-    def reset_counters(self):
-        with self.lock:
-            self.counters = dict(_EMPTY_COUNTERS)
-
     def get_snapshot(self) -> dict:
         with self.lock:
             return {
                 "result": dict(self.latest_result),
-                "counters": dict(self.counters),
                 "vision_mode": self.vision_mode,
             }
 

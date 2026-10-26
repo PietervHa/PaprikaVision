@@ -73,19 +73,6 @@ def test_review_still_labels_a_standing_fruit_as_review():
     assert PaprikaEngine._label_for(result, PLACEMENT_REVIEW) == "human check needed"
 
 
-def test_counters_keep_reviews_apart_from_rejects():
-    """A rising reject count is about the fruit; a rising review count is about
-    the detector. Summing them hides which one you are looking at."""
-    state = AppState()
-    assert state.counters["review"] == 0
-    state.increment_counter("NOK", placement="review", pose="lying")
-    state.increment_counter("NOK", placement="reject", pose="incomplete")
-    assert state.counters["review"] == 1
-    assert state.counters["reject"] == 1
-    state.reset_counters()
-    assert state.counters["review"] == 0
-
-
 def test_review_has_its_own_overlay_colour():
     from backend.utils.annotate import color_for_placement
     review = color_for_placement("review")

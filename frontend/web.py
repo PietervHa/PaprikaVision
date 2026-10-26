@@ -252,7 +252,6 @@ def create_app(camera, app_state) -> FastAPI:
             live = {**live, "primary": None, "detections": [], "stale": True}
         return {
             "result": snapshot["result"],
-            "counters": snapshot["counters"],
             "vision_mode": snapshot["vision_mode"],
             # The HMI shows the live view as the headline number, because that
             # is what the operator is looking at while adjusting the machine.
@@ -296,10 +295,5 @@ def create_app(camera, app_state) -> FastAPI:
             "rotation": rotation,
             "angle_shift_deg": rotation * 90,
         }
-
-    @app.post("/reset_counters")
-    def reset_counters():
-        app_state.reset_counters()
-        return {"success": True}
 
     return app

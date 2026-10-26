@@ -212,16 +212,6 @@ function renderLive(live, fromTrigger = false) {
   drawDial(orientation.angle_deg, placement);
 }
 
-function renderCounters(counters) {
-  if (!counters) return;
-  $("cntOk").textContent = counters.ok ?? 0;
-  $("cntReorient").textContent = counters.reorient ?? 0;
-  $("cntReview").textContent = counters.review ?? 0;
-  $("cntUpside").textContent = (counters.upside_down ?? 0) + (counters.standing_stem_up ?? 0);
-  $("cntIncomplete").textContent = counters.incomplete ?? 0;
-  $("cntTotal").textContent = counters.total ?? 0;
-}
-
 /* ---------------------------------------------------------------- polling */
 
 async function pollResult() {
@@ -242,7 +232,6 @@ async function pollResult() {
     } else {
       renderLive(data.live);
     }
-    renderCounters(data.counters);
     $("cameraDown").hidden = true;
   } catch (err) {
     $("cameraDown").hidden = false;
@@ -288,12 +277,6 @@ $("overlayBtn").addEventListener("click", async () => {
 $("rotateBtn").addEventListener("click", async () => {
   const res = await post("/camera_rotation");
   if (!res.ok) toast("Could not rotate camera.", true);
-});
-
-$("resetBtn").addEventListener("click", async () => {
-  const res = await post("/reset_counters");
-  if (res.ok) toast("Counters reset.");
-  else toast("Could not reset counters.", true);
 });
 
 /* ----------------------------------------------------------- file source

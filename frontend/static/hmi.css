@@ -218,17 +218,6 @@ html, body {
   white-space: nowrap;
 }
 
-/* -------------------------------------------------------------- counters */
-
-.counters { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; text-align: center; }
-.counter { display: flex; flex-direction: column; gap: 2px; }
-.counter span { font-variant-numeric: tabular-nums; font-size: 1.35rem; font-weight: 600; }
-.counter label { color: var(--text-dim); font-size: 0.7rem; }
-.counter-ok span { color: var(--place); }
-.counter-reorient span { color: var(--reorient); }
-.counter-reject span { color: var(--reject); }
-.counter-review span { color: var(--review); }
-
 /* ------------------------------------------------------------- controls */
 
 .ctrl {

@@ -470,54 +470,6 @@ def test_stemless_shape_fallback_can_be_switched_off():
     assert primary["orientation"]["angle_deg"] is None
 
 
-def test_stem_not_found_and_upside_down_are_counted_apart():
-    """The counters are the reason the split exists, so pin them.
-
-    A fruit the backend could not find a stem on must not increment the
-    upside_down counter, and the new key must exist from the start rather than
-    appearing only once the first such fruit goes past.
-    """
-    from backend.core.state import AppState
-
-    state = AppState()
-    assert state.counters["stem_not_found"] == 0
-    assert state.counters["upside_down"] == 0
-
-    state.increment_counter("NOK", placement="reject", pose=orient.POSE_STEM_NOT_FOUND)
-
-    counters = state.get_snapshot()["counters"]
-    assert counters["stem_not_found"] == 1
-    assert counters["upside_down"] == 0
-    assert counters["reject"] == 1
-
-    state.reset_counters()
-    assert state.counters["stem_not_found"] == 0
-
-
-def test_standing_poses_are_counted_apart_from_stem_not_found():
-    """standing_stem_up/down get their own counters too, for the same reason.
-
-    A climbing standing_stem_down count means the infeed is landing fruit
-    blossom-up; a climbing stem_not_found count means the stem detector, the
-    lighting, or the cultivar. Folding one into the other at the counter
-    level would silently undo the point of separating them at the pose
-    level above.
-    """
-    from backend.core.state import AppState
-
-    state = AppState()
-    assert state.counters["standing_stem_down"] == 0
-    assert state.counters["standing_stem_up"] == 0
-
-    state.increment_counter("NOK", placement="reject", pose=orient.POSE_STANDING_STEM_DOWN)
-
-    counters = state.get_snapshot()["counters"]
-    assert counters["standing_stem_down"] == 1
-    assert counters["standing_stem_up"] == 0
-    assert counters["stem_not_found"] == 0
-    assert counters["reject"] == 1
-
-
 def test_fruit_running_off_the_frame_is_incomplete_not_stem_not_found():
     """Half out of frame says something about the frame, not about the fruit -
     it may have a perfectly good stem you simply cannot see. Incomplete takes
