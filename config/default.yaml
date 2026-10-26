@@ -524,7 +524,7 @@ camera:
   source: "folder"
 
   folder:
-    path: "data/CleanImages_20261008"       # .bmp/.jpg/.png, read recursively
+    path: "data/raw"       # .bmp/.jpg/.png, read recursively
     interval_s: 2.0        # seconds per image
     loop: true             # start over at the end
     # hold: true stays on one image until you click on in the HMI. Needed when
@@ -726,7 +726,7 @@ capture:
   # Anything the keyboard package understands: "c", "f12", "ctrl+shift+s".
   # Avoid "q" - that is the manual vision trigger.
   hotkey: "c"
-  directory: "data/datasets/holdout_live2"
+  directory: "data/captures"
   save_result_json: true
 
   # png or jpg. Default png, and measured rather than assumed: these frames are
