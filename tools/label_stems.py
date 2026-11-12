@@ -902,6 +902,47 @@ def repair(args) -> int:
     return 0
 
 
+def angle_error(reported: float, truth: float) -> float:
+    """Degrees between a reported direction and the labelled one, 0-180."""
+    return abs(((reported - truth + 180) % 360) - 180)
+
+
+def report_within(errors: list[float]) -> None:
+    """Median, p90, worst and the share within 10/20/30/45 degrees.
+
+    Shared with tools.compare_aurora --score-aurora, like report() below.
+    """
+    values = np.array(errors)
+    print(f"   n={len(values)}   median {np.median(values):.1f} deg   "
+          f"p90 {np.percentile(values, 90):.1f}   worst {values.max():.1f}")
+    for limit in (10, 20, 30, 45):
+        print(f"   within {limit:>2} deg: {100 * (values < limit).mean():3.0f}%"
+              f"   ({int((values >= limit).sum())} fruit worse)")
+
+
+def report(name: str, subset: list[dict]) -> None:
+    """One line of angle-error statistics for a group of scored fruit.
+
+    Each row needs an "error" in degrees, or None when no angle was given.
+    Shared with tools.compare_aurora --score-aurora so that our engine and
+    Aurora are scored by the same code against the same labels; a second copy
+    could drift and the comparison would no longer be fair.
+    """
+    measured = [r["error"] for r in subset if r["error"] is not None]
+    silent = len(subset) - len(measured)
+    line = f"  {name:<26} n={len(subset):>4}"
+    if measured:
+        values = np.array(measured)
+        line += (f"  median {np.median(values):5.1f} deg"
+                 f"  p90 {np.percentile(values, 90):6.1f}"
+                 f"  <10deg {100 * (values < 10).mean():3.0f}%"
+                 f"  <20deg {100 * (values < 20).mean():3.0f}%"
+                 f"  flipped {int((values > 120).sum())}")
+    if silent:
+        line += f"   ({silent} gave no angle)"
+    print(line)
+
+
 def score(args) -> int:
     from backend.core.paprika_engine import PaprikaEngine
 
@@ -943,7 +984,7 @@ def score(args) -> int:
             angle = (found.get("orientation") or {}).get("angle_deg")
             error = None
             if angle is not None:
-                error = abs(((angle - entry["true_angle_deg"] + 180) % 360) - 180)
+                error = angle_error(angle, entry["true_angle_deg"])
             rows.append({
                 "placement": found["placement"],
                 "source": (found.get("orientation") or {}).get("source"),
@@ -960,21 +1001,6 @@ def score(args) -> int:
     if not rows:
         print("Nothing to score.")
         return 1
-
-    def report(name: str, subset: list[dict]) -> None:
-        measured = [r["error"] for r in subset if r["error"] is not None]
-        silent = len(subset) - len(measured)
-        line = f"  {name:<26} n={len(subset):>4}"
-        if measured:
-            values = np.array(measured)
-            line += (f"  median {np.median(values):5.1f} deg"
-                     f"  p90 {np.percentile(values, 90):6.1f}"
-                     f"  <10deg {100 * (values < 10).mean():3.0f}%"
-                     f"  <20deg {100 * (values < 20).mean():3.0f}%"
-                     f"  flipped {int((values > 120).sum())}")
-        if silent:
-            line += f"   ({silent} gave no angle)"
-        print(line)
 
     print(f"\n{len(rows)} labelled fruit scored against the detector\n")
     report("ALL", rows)
@@ -1004,13 +1030,8 @@ def score(args) -> int:
               if r["placement"] == "place" and r["error"] is not None]
     print("\n" + "=" * 66)
     if placed:
-        values = np.array(placed)
         print("THE NUMBER THAT MATTERS - fruit the machine actually placed:")
-        print(f"   n={len(values)}   median {np.median(values):.1f} deg   "
-              f"p90 {np.percentile(values, 90):.1f}   worst {values.max():.1f}")
-        for limit in (10, 20, 30, 45):
-            print(f"   within {limit:>2} deg: {100 * (values < limit).mean():3.0f}%"
-                  f"   ({int((values >= limit).sum())} fruit worse)")
+        report_within(placed)
         print("\n   A placed fruit that is far out is the failure this system exists")
         print("   to prevent - it reaches the actuator with nothing flagged.")
     else:
