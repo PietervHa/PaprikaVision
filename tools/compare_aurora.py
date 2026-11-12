@@ -64,6 +64,13 @@ labelled as a holdout set and both systems scored on it. Label into a separate
 
 It sits under data/datasets, which retrain skips when it collects labelled
 frames, so the review set never ends up in training.
+
+Live, next to the line
+----------------------
+    python -m tools.compare_aurora --watch \\\\AURORA-PC\\Shadow
+
+follows Aurora's folder while the line runs, with the same per-frame path and
+review layout as above. See tools/aurora_watch.py.
 """
 
 from __future__ import annotations
@@ -445,14 +452,20 @@ def draw_overlay(frame: np.ndarray, records: list[dict], threshold: float) -> np
 
 
 def write_review(out_dir: Path, camera: str, image_path: Path, frame: np.ndarray,
-                 records: list[dict], unmatched: list[dict], threshold: float) -> None:
+                 records: list[dict], unmatched: list[dict], threshold: float,
+                 data: bytes | None = None) -> None:
+    """`data`: the image's bytes as already read. The watch passes them so the
+    copy is exactly what was compared, without a second read of the source."""
     frames_dir = out_dir / "frames" / camera
     overlays_dir = out_dir / "overlays" / camera
     frames_dir.mkdir(parents=True, exist_ok=True)
     overlays_dir.mkdir(parents=True, exist_ok=True)
     # The original, byte for byte and under its own name, so it can be
     # labelled and scored like any other frame.
-    shutil.copy2(image_path, frames_dir / image_path.name)
+    if data is None:
+        shutil.copy2(image_path, frames_dir / image_path.name)
+    else:
+        (frames_dir / image_path.name).write_bytes(data)
     cv2.imwrite(str(overlays_dir / f"{image_path.stem}.overlay.jpg"),
                 draw_overlay(frame, records, threshold))
     flagged = [dict(r, over_threshold=r["diff_deg"] is not None and r["diff_deg"] > threshold)
@@ -622,6 +635,29 @@ COUNT_KEYS = ("frames_in_csv", "frames_compared", "frames_missing", "frames_unre
               "review_frames", "review_pairs")
 
 
+def process_frame(engine, camera: str, frame_name: str, frame: np.ndarray,
+                  rows: list[AuroraRow], threshold: float) -> dict | None:
+    """One frame through our engine, paired with Aurora's lines for it.
+
+    Shared by compare() and the live watch (tools/aurora_watch.py), so both
+    judge a frame the same way. Writes nothing. None when the engine failed.
+    """
+    evaluated = engine.evaluate(frame)
+    if evaluated.get("failure_reason") in ("detector_unavailable", "detector_error"):
+        # Not "we found nothing": every Aurora pepper would count as
+        # unmatched and read like a detector that misses fruit.
+        return None
+    detections = evaluated["detections"]
+    peppers = [r for r in rows if r.index >= 0]
+    matched, lonely_aurora, lonely_ours = pair_up(peppers, detections)
+    records = [pair_record(camera, frame_name, p, d) for p, d in matched]
+    lonely = ([unmatched_record(camera, frame_name, "ours", d) for d in lonely_ours]
+              + [unmatched_record(camera, frame_name, "aurora", p) for p in lonely_aurora])
+    over = [r for r in records if r["diff_deg"] is not None and r["diff_deg"] > threshold]
+    return {"peppers": len(peppers), "detections": len(detections),
+            "records": records, "unmatched": lonely, "over": over}
+
+
 def compare(cameras: list[tuple[str, Path]], engine, out_dir: Path, threshold: float = 30.0,
             limit: int = 0, settings: dict | None = None) -> dict:
     """Run the engine on every frame Aurora logged, pair, summarise, write review."""
@@ -667,27 +703,17 @@ def compare(cameras: list[tuple[str, Path]], engine, out_dir: Path, threshold: f
             if frame is None:
                 unreadable.append(name)
                 continue
-            evaluated = engine.evaluate(frame)
-            if evaluated.get("failure_reason") in ("detector_unavailable", "detector_error"):
-                # Not "we found nothing": every Aurora pepper would count as
-                # unmatched and read like a detector that misses fruit.
+            result = process_frame(engine, camera, path.name, frame, rows, threshold)
+            if result is None:
                 failed.append(name)
                 continue
             counts["frames_compared"] += 1
-            detections = evaluated["detections"]
-            peppers = [r for r in rows if r.index >= 0]
-            counts["aurora_peppers"] += len(peppers)
-            counts["our_detections"] += len(detections)
-
-            matched, lonely_aurora, lonely_ours = pair_up(peppers, detections)
-            records = [pair_record(camera, path.name, p, d) for p, d in matched]
-            lonely = ([unmatched_record(camera, path.name, "ours", d) for d in lonely_ours]
-                      + [unmatched_record(camera, path.name, "aurora", p)
-                         for p in lonely_aurora])
+            counts["aurora_peppers"] += result["peppers"]
+            counts["our_detections"] += result["detections"]
+            records, lonely, over = result["records"], result["unmatched"], result["over"]
             pairs.extend(records)
             unmatched.extend(lonely)
 
-            over = [r for r in records if r["diff_deg"] is not None and r["diff_deg"] > threshold]
             if over:
                 counts["review_frames"] += 1
                 counts["review_pairs"] += len(over)
@@ -762,6 +788,20 @@ def engine_settings(cfg: dict) -> dict:
         "device": block.get("device"),
         "min_angle_confidence": policy.get("min_angle_confidence"),
     }
+
+
+def build_engine(config_path=None):
+    """(engine, settings): the engine the app runs, with its model loaded now."""
+    from backend.core.paprika_engine import PaprikaEngine
+
+    cfg = label_stems.load_config(config_path)
+    settings = engine_settings(cfg)
+    print("engine: " + ", ".join(f"{k}={v}" for k, v in settings.items()))
+    engine = PaprikaEngine(cfg)
+    # As in label_stems --score: a model that cannot run would report every
+    # fruit unmatched, which reads like a bad model rather than a broken config.
+    engine.load_model()
+    return engine, settings
 
 
 # ------------------------------------------------------------------ score Aurora
@@ -932,9 +972,17 @@ def score_aurora(folders, labels_dir: Path, worst: int = 10) -> int:
 
 
 def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if any(a == "--watch" or a.startswith("--watch=") for a in argv):
+        # Live mode has its own parser and module, so it cannot change this one.
+        from tools import aurora_watch
+
+        return aurora_watch.main(argv)
+
     parser = argparse.ArgumentParser(
         description="Compare this app with Aurora Vision on frames Aurora logged. "
-                    "Source frames are only ever read."
+                    "Source frames are only ever read.",
+        epilog="Live, next to the line: --watch ROOT (python -m tools.aurora_watch -h)",
     )
     parser.add_argument("folders", nargs="+",
                         help="camera folder(s) holding Image_*.bmp and results.csv, "
@@ -968,15 +1016,7 @@ def main(argv=None) -> int:
                   f"  source: {folder}\n  out:    {out_dir}")
             return 1
 
-    from backend.core.paprika_engine import PaprikaEngine
-
-    cfg = label_stems.load_config(args.config)
-    settings = engine_settings(cfg)
-    print("engine: " + ", ".join(f"{k}={v}" for k, v in settings.items()))
-    engine = PaprikaEngine(cfg)
-    # As in label_stems --score: a model that cannot run would report every
-    # fruit unmatched, which reads like a bad model rather than a broken config.
-    engine.load_model()
+    engine, settings = build_engine(args.config)
     compare(cameras, engine, out_dir, args.threshold, args.limit, settings)
     return 0
 
