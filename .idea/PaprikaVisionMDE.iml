@@ -3,15 +3,14 @@
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/deploy" />
     </content>
     <orderEntry type="jdk" jdkName="~\Documents\PaprikaVisionMDE\.venv" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
-  <component name="PackageRequirementsSettings" />
   <component name="PyDocumentationSettings">
     <option name="format" value="PLAIN" />
   </component>
-  <component name="ReSTService" />
   <component name="TemplatesService">
     <option name="TEMPLATE_FOLDERS">
       <list>
