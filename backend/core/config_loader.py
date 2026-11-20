@@ -33,6 +33,7 @@ def _load_config() -> dict:
     args, _ = parser.parse_known_args()
 
     config_path = Path(args.config) if args.config else PROJECT_ROOT / "config" / "default.yaml"
+    print(f"[config] {config_path.resolve()}", flush=True)
 
     if not config_path.exists():
         log.error("Configuration file not found: %s", config_path)

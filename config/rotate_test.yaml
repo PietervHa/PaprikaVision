@@ -1,0 +1,758 @@
+# ROTATE TEST - the rotate-unit model on rotate frames, without the belt's decision rules.
+# A copy of default.yaml; every change is marked ROTATE TEST. Start with:
+#     .venv\Scripts\python.exe -m backend.main --config config\rotate_test.yaml
+# HMI: http://localhost:5051 (the belt app keeps 5050). Judge the arrow, not the confidence:
+# the confidence formula here is the belt's and comes out low for rotate stems.
+#
+# PaprikaVisionMDE configuration
+#
+# Orientation-driven paprika placement. The job of this system is to answer
+# one question per fruit: which way does the stem point, and can that answer
+# be trusted enough to place on.
+
+vision_mode: "paprika"     # "paprika" | "idle"
+machine_id: "paprika-rotate-test"   # ROTATE TEST
+
+# =============================================================================
+# PAPRIKA DETECTION AND ORIENTATION
+# =============================================================================
+paprika:
+
+  # ---------------------------------------------------------------------------
+  # backend: which detector finds the fruit.
+  #
+  #   "shape"      No model. Segments saturated fruit against the belt and
+  #                orients from silhouette alone. START HERE - it runs today,
+  #                before any annotation exists, so the HMI, the arrow, the
+  #                angle convention and the PLC handshake can all be
+  #                commissioned while the dataset is still being collected.
+  #                Needs a belt that is markedly less saturated than the fruit,
+  #                and cannot separate two touching paprikas.
+  #
+  #   "pose"       Trained YOLO pose model: one box plus stem_end and
+  #                blossom_end per fruit. The production backend. Handles
+  #                touching fruit and stemless fruit properly.
+  #
+  #   "simulator"  Synthetic fruit rotating at a known 30 deg/s, camera
+  #                ignored. For proving the PLC angle convention on a bench:
+  #                because the true angle is known exactly, any mismatch at the
+  #                PLC end is a convention bug, not a detection bug.
+  # ---------------------------------------------------------------------------
+  backend: "pose"
+
+  confidence: 0.25          # ROTATE TEST: as tools.score_rotate (belt: 0.45)
+  max_detections: 8
+
+  # Which fruit the actuator acts on when several are in frame.
+  #   "largest"    biggest silhouette - normally the one fully in view rather
+  #                than one half-entering the frame, whose angle would be
+  #                measured from a partial fruit. Default for a reason.
+  #   "confidence" highest orientation confidence
+  #   "centered"   closest to the middle of the frame
+  primary_rule: "largest"
+
+  # Run the silhouette estimator alongside the keypoints and cross-check them.
+  #
+  # OFF, and measured rather than assumed. The idea was that the stem end sits
+  # on the wider shoulder, so the silhouette could settle which end is which on
+  # a fruit whose stem broke off. On 87 real fruit with a visible stem, that
+  # holds only 66% of the time, with a median signal strength of 0.074 and a
+  # median elongation of just 1.33 - a blokpaprika is too round and too
+  # symmetric for its outline to carry the answer. 66% is barely better than a
+  # coin toss, and a confident-looking wrong angle is the one failure this
+  # system exists to prevent.
+  #
+  # Re-measure the mean flip confidence if you switch cultivar - it is this
+  # decision in one number. On a long, tapered pepper this estimator would earn
+  # its place again.
+  # Run the silhouette estimator alongside the keypoints on every fruit.
+  #
+  # Now true. It was off because the silhouette used to be worse than useless -
+  # it pointed at the wrong end on 63% of fruit. Stripping the stem protrusion
+  # before the width profile fixed that, and 802 hand-labelled fruit since have
+  # shown what the second opinion is actually worth: not a better angle, but a
+  # reliable warning. Where the two estimators diverge, the keypoint error
+  # climbs from a 3 degree median to over 90 (see
+  # policy.max_estimator_disagreement_deg).
+  #
+  # Costs one extra segment_fruit and PCA per fruit, a few milliseconds against
+  # a 60-240ms scan. fuse() still lets the keypoints keep the axis; the
+  # silhouette only settles the flip, and now raises a flag.
+  shape_crosscheck: false
+
+  # When the stem cannot be found AT ALL on a fully-visible fruit, ask the
+  # silhouette instead of rejecting outright.
+  #
+  # A paprika is measurably wider at the stem end (the shoulder, where the
+  # calyx sits) than at the blossom end, and that is readable from the
+  # outline alone - no stem required, on a fruit shape_orientation() itself
+  # calls "lying" (elongation above min_elongation in orientation.py,
+  # currently 1.12).
+  #
+  # A round silhouette - standing on either end - has no wider end to read
+  # when the camera is looking straight down the long axis instead of along
+  # its side, so no angle is invented for it either way. It IS reported as
+  # standing_stem_down rather than a plain stem_not_found reject, though:
+  # a fruit standing stem-up would show its stem as an isolated protrusion
+  # near the centre of a round blob, which colour or morphology should have
+  # caught, so both routes finding nothing on a silhouette that was actually
+  # measured is itself the evidence the stem is underneath.
+  #
+  # The angle this produces still goes through policy.min_flip_confidence
+  # below like any other estimate, so a weak signal is sent round again
+  # rather than placed on a coin flip - see the measurement note on
+  # shape_crosscheck above for how weak that signal usually is on real
+  # fruit. Set false to go back to rejecting every stemless fruit outright
+  # as stem_not_found, lying or not.
+  stemless_shape_fallback: false   # ROTATE TEST: belt shape fallback
+
+  # Landmark separation below this fraction of the box diagonal means the long
+  # axis is pointing at the camera - the fruit is stood on one end and has no
+  # meaningful in-plane rotation. Raise it if standing fruit is being reported
+  # as lying at a random angle; lower it if short, blocky fruit is wrongly
+  # called standing.
+  min_span_ratio: 0.02      # ROTATE TEST: a rotate stem is short next to the whole fruit (0.05-0.2); belt 0.18
+
+  # Let the silhouette overrule a "lying" verdict on a fruit that is standing.
+  #
+  # Keypoints only report standing when the model puts the two landmarks nearly
+  # on top of each other, and the pose model has almost never seen that: its
+  # training set was 5.5% standing fruit and 0% occluded landmarks, so it has
+  # essentially no example of the two ends coinciding. It spreads them instead,
+  # and the fruit comes out "lying" with a guessed angle - or, when the
+  # landmarks are uncertain, as "human check needed".
+  #
+  # end_on.py reads the fruit's own outline and surface rather than its
+  # landmarks, so it does not share that blind spot. Measured at AUC 0.872
+  # leave-one-session-out on 254 hand-labelled crops.
+  #
+  # Consulted ONLY when the keypoints are unconvincing about lying - landmarks
+  # close together, or low pair confidence. That gate matters: on fruit with
+  # strong stem evidence the same classifier scores 0.84-0.98, higher than the
+  # fruit it is meant to catch, so letting it overrule a confident reading
+  # would cost more than it saves.
+  #
+  # Set false to trust the landmarks alone. Raise end_on_span_ratio_max or
+  # end_on_conf_max to consult the silhouette on more fruit, lower them to
+  # consult it on fewer.
+  end_on_overrides_lying: false   # ROTATE TEST: belt "standing on its end" re-check
+  end_on_span_ratio_max: 0.22
+  end_on_conf_max: 0.55
+
+  shape:
+    # Belt hue range, EXCLUDED from the fruit mask. Measured on the real line:
+    # the blue belt sits in a tight band at hue 100-125 (OpenCV 0-179 scale)
+    # and every paprika colour falls outside it.
+    #
+    # This is the rule that does the work. Saturation alone cannot separate a
+    # blue belt from fruit, because the belt is strongly saturated too - blue
+    # is chosen in food handling precisely because no produce is blue, and that
+    # makes hue the clean discriminator. Set to [0, 0] on a neutral grey belt
+    # to fall back to saturation only.
+    belt_hue: [96, 145]
+
+    # These two remove the pale structural strips at the belt edges, which are
+    # unsaturated and would otherwise survive the hue rule, plus deep shadow.
+    saturation_floor: 80
+    value_floor: 45
+
+    min_area_px: 4000        # ignore blobs smaller than this
+    # Fallback only, used when no belt is visible. Size limits are normally
+    # taken from the BELT WIDTH, not from the frame.
+    #
+    # Frame-relative limits encode how the camera happens to be framed. Moving
+    # the lens closer made fruit occupy 20-30% of the frame instead of 5%, and
+    # every one of them was then rejected as "too large" - the detector
+    # returned nothing at all. Measured against the belt a paprika spans 0.33 of
+    # its width (p99 0.456), and that ratio belongs to the product and the
+    # machine, not to the lens.
+    #
+    # See MIN/MAX_FRUIT_AREA_PER_BELT2 in classical.py for the belt-relative
+    # limits that are actually used.
+    max_area_ratio: 0.18
+
+    # Restrict detection to the belt surface itself. Without this, "fruit" is
+    # defined as "not belt-coloured", which quietly makes every non-blue object
+    # in view a candidate: a machine guard, a crate, a sleeve. Measured on a
+    # belt with machine frame either side, a crate standing beside the belt was
+    # detected as a fruit without this and is correctly ignored with it.
+    #
+    # A fruit is judged by what rings it, not by what it overlaps, and other
+    # produce counts as an acceptable neighbour - clustered fruit are ringed by
+    # each other rather than by belt, which is normal on a full belt.
+    #
+    # Falls back to searching the whole frame, with a warning in the log, when
+    # no belt is recognisable - a camera knocked askew should degrade loudly
+    # rather than silently stop finding product.
+    restrict_to_belt: true
+
+    # Two-stage search: first coarsely on a downscaled image for where
+    # something lies, then a precise measurement per region at full resolution.
+    # Every measurement comes from the original pixels; the downscale only
+    # decides where to look. Measured on 160 images of 900x1092: 105 ms -> 18 ms
+    # per image, with identical keypoints (0.0 px median displacement) and the
+    # same number of fruit. Set to false to verify both paths agree.
+    use_roi: true
+
+    # Re-run stem detection at two other gains to see whether the stem
+    # direction holds still. Costs about 1.2 ms per image and is the only thing
+    # that reliably identifies an unstable green fruit before it is placed.
+    stem_selfcheck: true
+
+    # How much of the fruit diameter may be cut away by the frame border before
+    # the fruit counts as "incomplete". Fruit grazing the border sit around
+    # 0.16, fruit genuinely running off it around 0.69.
+    edge_cut_threshold: 0.30
+
+  pose:
+    model_path: "models/rotate/rotate_v1.pt"   # ROTATE TEST: the .pt - the .onnx needs an export record in rotate_v1.json
+    # Where the model runs: "auto", "cpu", or a CUDA index such as "0".
+    # "auto" is the NVIDIA GPU when the runtime can use one, otherwise the CPU;
+    # an .onnx under the plain onnxruntime package always runs on the CPU. An
+    # index with no such GPU stops the app at startup rather than quietly
+    # running somewhere else.
+    # On the CPU the app keeps CUDA off for the whole process: on a machine with
+    # an NVIDIA driver, PyTorch merely asking for GPUs crashed the app minutes
+    # later (backend/utils/cuda_env.py). "auto" still has to ask PyTorch, so a
+    # machine with an NVIDIA driver that should run on the CPU must say "cpu".
+    # model_path takes the .pt or its ONNX export (python -m tools.export_onnx).
+    # The export accepts any input size, but imgsz must match the size it was
+    # trained and exported at (the "onnx" record in models/paprika_pose.json)
+    # or the app refuses to start.
+    device: "cpu"
+    imgsz: 640                # ROTATE TEST: trained at 640 (belt 416)
+    # Below this, a landmark is treated as "positioned but not visible" rather
+    # than discarded. That distinction is what lets the engine tell a fruit
+    # standing stem-down from one it simply failed on, so do not set it so high
+    # that occluded landmarks vanish entirely.
+    keypoint_confidence: 0.30
+    # ROTATE TEST: the fruit may touch the image edge. Needs the two-line change in
+    # pose_detector.py (self._edge_cut); without it this line is ignored and fruit on
+    # the edge are called 'incomplete'. Belt default: 0.23.
+    edge_cut_threshold: 1.0
+    # Let cuDNN time its algorithms for each input shape instead of guessing.
+    # Off, it picks slow ones for some shapes. Quadro M1200, 900x1092 frames,
+    # median ms, off -> on:
+    #   640: 89.1 -> 86.4   512: 99.0 -> 59.4   480: 93.3 -> 56.0
+    #   416: 55.2 -> 45.5   320: 45.7 -> 36.0
+    # Tuning happens on the first call per shape; the startup warm-up pays it
+    # for the real frame size. Only matters on CUDA.
+    cudnn_benchmark: true
+
+  # ---------------------------------------------------------------------------
+  # policy: when is an angle trustworthy enough to act on?
+  #
+  # Asymmetric costs. A wrong angle places a paprika backwards and the error
+  # leaves the cell; an honest "don't know" just sends it round the loop again.
+  # Start strict and relax with evidence from real production logs.
+  # ---------------------------------------------------------------------------
+  policy:
+    # A fruit lying upside down or running off the frame gets NO angle and NO
+    # coordinates - not because the measurement failed, but because there is
+    # nothing to measure. The robot cannot pick up an upside-down paprika and
+    # turn it over, so returning a number would imply an action that does not
+    # exist. The PLC simply gets NOK.
+    min_angle_confidence: 0.0     # ROTATE TEST: the confidence formula is belt-specific - show every angle
+
+    # Floor below which no angle is reported at all.
+    #
+    # These two thresholds say different things. Between 0.15 and 0.45 the
+    # machine HAS a measurement and does not trust it enough to act - that is
+    # "unknown", and the angle is still shown so an operator can see what it
+    # was leaning towards. Below 0.15 there is no measurement: the numbers
+    # coming out are whatever the noise happened to be, and printing one next
+    # to the fruit invites somebody to read meaning into it. Those are marked
+    # "human check needed", the angle is withheld from the result and the dial,
+    # and the value that was discarded is kept in the notes.
+    #
+    # Counted separately from reject, because they are different faults to go
+    # and fix: a rising reject count is about the fruit, a rising review count
+    # is about the detector.
+    min_usable_confidence: 0.0    # ROTATE TEST
+
+    # Refuse to PLACE when the keypoints and the silhouette point in different
+    # directions by more than this.
+    #
+    # Measured over 802 hand-labelled fruit - the keypoint error against the
+    # clicked truth, bucketed by how far the two estimators disagreed:
+    #
+    #   disagreement    n    median err   over 20 deg
+    #     0-10 deg    439        3.0          10%
+    #    10-20 deg    102        4.9          15%
+    #    20-35 deg     56        8.0          30%
+    #    35-60 deg     22       53.5          77%
+    #   60-120 deg     17       91.2          82%
+    #  120-181 deg      5      135.7         100%
+    #
+    # At 30 this flags 9% of fruit, and 74% of what it flags really is more
+    # than 20 degrees out. At 20 it flags 16% and catches more of the tail, but
+    # only 53% of what it flags is genuinely bad - so half the throughput is
+    # spent on fruit that were fine. Lower it if a wrong angle costs more than
+    # a second pass on your line; raise it if the reverse.
+    #
+    # Reorient, not reject: the fruit is fine, the two readings simply cannot
+    # both be right, and another pass may settle it.
+    max_estimator_disagreement_deg: 30.0
+
+    # Whether "unknown" also hides its angle.
+    #
+    # The three non-placing verdicts mean different things and only one of them
+    # has a usable number behind it:
+    #   reorient - the angle is trusted, the stem END is not. Keep the angle.
+    #   unknown  - the ANGLE itself is not trusted. Hide it.
+    #   review   - there is no measurement at all. Hide it (always).
+    #
+    # Drawing "stem 29 deg (unknown)" beside a fruit whose stem is plainly
+    # somewhere else is the machine guessing out loud, and an operator reads
+    # the number long before they read the bracket. The discarded value is
+    # still written to the notes.
+    hide_unknown_angle: false      # ROTATE TEST
+
+    # Refuse to PLACE a fruit whose stem was never seen or never verified.
+    #
+    # From the first ground-truth run - 470 hand-clicked stem positions scored
+    # against the detector. The machine is good overall: placed fruit sit at a
+    # median of 2.4 degrees with 90% inside 10. But the tail that reached the
+    # actuator was concentrated in two groups, both far above their base rate
+    # among placements:
+    #
+    #   shape_only             1.2% of placements, 3 of the 15 worst (30-105
+    #                          degrees out). No stem was ever found; the end is
+    #                          inferred from the silhouette alone.
+    #   selfcheck_unavailable  6.2% of placements, 5 of the 15 worst, including
+    #                          the single worst at 173 degrees. The stability
+    #                          check could not run, so nothing verified it -
+    #                          which is not the same as verified good.
+    #
+    # Both become reorient, not reject: the fruit is fine, the measurement is
+    # not good enough to act on, and another pass may produce one that is.
+    # Costs roughly 7% of placements.
+    #
+    # Set false to go back to placing on unverified measurements - worth doing
+    # only if a second pass is expensive enough to outweigh a 170-degree miss.
+    require_verified_stem: true   # below this -> "unknown"
+    min_flip_confidence: 0.40    # axis is solid but which end is the stem is not
+    # true  -> a standing fruit is a reject (topple and re-present it)
+    # false -> reported as "reorient" instead
+    reject_standing: true
+
+    # What to do with a fruit whose stem could not be found while the fruit
+    # itself is fully in frame.
+    #
+    # true  -> reorient. The default, because "no stem found" describes what
+    #          this VIEW failed to show, not what the fruit is: very often the
+    #          stem is facing away or tucked underneath, and one more pass
+    #          shows it. Costs a cycle, keeps the fruit.
+    # false -> reject, the older behaviour. Choose this only if a second pass
+    #          is expensive on your line and you would rather bin the fruit.
+    #
+    # This matters most on green, where _stem_by_hue returns nothing by design
+    # (stem and flesh share a hue) and morphology carries the load. Rejecting
+    # here would send a large share of a green crop to the bin for a
+    # limitation of the camera angle rather than a fault in the fruit.
+    #
+    # It never places a guess either way: there is still no angle, so nothing
+    # wrong can reach the actuator.
+    reorient_stem_not_found: true
+
+    # End-on detection for stemless fruit: is the camera looking down the
+    # fruit's axis (blossom scar or calyx facing it - standing or upside down),
+    # or at its side with the stem merely hidden?
+    #
+    # A blokpaprika is round in outline from every direction, so elongation
+    # cannot answer this - it scores AUC 0.685, barely better than a coin, and
+    # an earlier revision decided it on exactly that. The classifier in
+    # backend/detection/paprika/end_on.py reads surface texture at the centre
+    # of the silhouette, groove alignment and convexity instead: AUC 0.927 over
+    # 254 hand-labelled crops, 0.872 leave-one-session-out.
+    #
+    # detect_end_on   run it and record the verdict in the notes.
+    # end_on_decides  ALSO act on it, turning a confident end-on fruit from
+    #                 stem_not_found (reorient) into upside_down (reject).
+    #
+    # Shipped reporting-only. 0.872 is well short of good enough to bin fruit
+    # on, and the fit comes from six sessions of one line, so it will be
+    # somewhat optimistic on a different week's crop. Leave end_on_decides off
+    # until your own logs say the flag is trustworthy - it costs nothing to
+    # gather that evidence, and everything to assume it.
+    detect_end_on: false           # ROTATE TEST: belt end-on detection
+    end_on_decides: false
+
+    # Above this probability a fruit is called end-on. Measured
+    # leave-one-session-out: 0.45 finds 26 of 57 end-on fruit and mislabels 5
+    # of 197 side-on ones; 0.35 finds 32 but mislabels 16. Precision is the
+    # side worth protecting - a side-on fruit called end-on is a good fruit
+    # accused of being unpickable. Under half the end-on fruit are caught
+    # either way, so an unflagged fruit means nothing.
+    end_on_threshold: 0.45
+
+    # A hue "stem" smaller than this fraction of the fruit is a speck - a
+    # highlight, a fleck of belt dirt, a green blemish - not a calyx. Over 265
+    # real hue stems the median is 0.040 and the 5th percentile 0.0054; four
+    # fruit being placed at a guessed angle while lying blossom-up scored
+    # 0.0034 to 0.0127.
+    #
+    # Size alone is not enough to act on: catching all four needs 0.013, which
+    # costs 24 of 239 placements. Below this threshold the end-on classifier is
+    # consulted as well, and only fruit failing BOTH tests lose their stem.
+    # That pair fires on 5 of 239, four of them the known bad ones.
+    min_stem_area_ratio: 0.015
+
+    # A stemless fruit that is clearly not end-on is lying there with a real
+    # axis, so read it from the grooves rather than reporting nothing. The
+    # outline cannot supply it - side-on a blokpaprika measures about 1.07
+    # elongation and the principal axis of a shape that round is noise. Checked
+    # against the silhouette axis on 113 labelled side-on crops: 4.2 degrees
+    # median disagreement where the outline was trustworthy enough to compare.
+    #
+    # No flip is claimed. Grooves give an orientation, not a direction, so the
+    # fruit still goes for another look instead of being placed on a coin toss.
+    groove_axis_fallback: false    # ROTATE TEST: belt groove analysis
+    # Below this the grooves are too faint to read and the axis would be the
+    # direction of whatever noise was strongest. Labelled side-on fruit run
+    # 0.59-0.63; end-on fruit, where the grooves converge and cancel, 0.09-0.20.
+    min_groove_coherence: 0.35
+
+    # Maximum movement of the stem direction, in degrees, when the same fruit
+    # is re-detected under an 8% lighting change. Above this the fruit is sent
+    # for reorientation instead of placed.
+    #
+    # This is what fixed erratic scans on green paprika. On red, orange and
+    # yellow the green stem separates on hue and the angle is solid to well
+    # under a degree. On green the stem has to be found by shape, and a tail of
+    # roughly 20% of those produce a direction that moves with the light -
+    # measured up to 37 degrees between two frames of the same pepper. Nothing
+    # about how confident the result looked predicted which ones: scale
+    # agreement, orientation confidence and mask jitter each caught only 1 in 5.
+    # Re-running the detection under the actual disturbance separates them
+    # cleanly (1.1 vs 29.1 degrees median spread).
+    #
+    # Raise it to place more fruit and accept more misplacements; lower it to be
+    # stricter. Set the whole check off with paprika.shape.stem_selfcheck.
+    max_stem_spread_deg: 6.0
+
+    # A stem WAS found (this fruit never went through the no_stem path above)
+    # but the verdict was not placeable - on green that is most often the
+    # self-check above collapsing quality on a stem it could not re-find
+    # under one of the two brightness variants, which drags BOTH the axis and
+    # the flip confidence down together, not just the flip. Tightening stem
+    # detection to cut that does not help: it only pushes more green fruit
+    # into the same no_stem/shape-only path, running the same width-profile
+    # geometry a visible-but-uncounted stem stub can flip outright (see the
+    # shape_orientation docstring in orientation.py). Consulting shape here
+    # instead - below min_usable_confidence it stands in fully, otherwise it
+    # goes through the same fuse() arbitration shape_crosscheck uses - was
+    # measured to recover exactly this case on synthetic fruit; it has not
+    # yet been measured against labelled real crops the way the numbers above
+    # were, so treat it as a first pass and re-check it before relying on it
+    # at volume.
+    uncertain_shape_crosscheck: false   # ROTATE TEST: belt shape cross-check
+    # Colour finds the stem directly on red/orange/yellow (measured hit rate
+    # 87% - see stem_by_hue in classical.py), so there is nothing uncertain
+    # there worth a second opinion. Green is the only colour that cannot see
+    # its own stem by hue at all.
+    uncertain_shape_colours: [green]
+
+    # Compare whatever axis the pipeline settles on - keypoints, fused, or a
+    # shape-only fallback - against the fruit's own surface grooves, read
+    # independently of the pose model and the segmentation mask both of the
+    # others depend on. See the "third signal" section of the
+    # orientation.py module docstring for the reasoning: keypoints and shape
+    # both start from the same evidence, so on a fruit where that evidence
+    # is misleading they can be confidently wrong together, and a groove
+    # reading from texture alone does not share that blind spot. NOT the
+    # same thing as groove_axis_fallback above: that supplies an axis when
+    # there is none; this only ever casts doubt on an axis that already
+    # exists, and can downgrade a placement but never produce or change one.
+    #
+    # This can only ever flag a disagreement or cut confidence - never set
+    # the angle or decide the flip, because a groove has no front or back
+    # (see end_on.groove_axis). Costs one more segment_fruit + groove_axis
+    # call, only on a fruit that was already about to be placed (see the
+    # PLACEMENT_PLACE guard around the call site in _evaluate_one) - a fruit
+    # already headed for reorient/reject/review pays nothing extra, since
+    # this check cannot change that outcome.
+    #
+    # Shipped OFF. The mechanism is exercised end to end by
+    # tests/test_groove_crosscheck.py, but unlike
+    # max_estimator_disagreement_deg it has not yet been checked against
+    # labelled data - measure whether groove disagreement predicts angle error
+    # on your own captures before switching this on at volume.
+    groove_crosscheck: false
+    # Colour finds the stem directly on red/orange/yellow (87% hit rate), so
+    # there is nothing uncertain there worth the extra call - same reasoning
+    # as uncertain_shape_colours above. Widen this once a coherence-gated
+    # groove breakdown on labelled data shows it earns its keep on another
+    # colour too.
+    groove_crosscheck_colours: [green]
+    # How far the settled axis may disagree with a high-coherence groove
+    # reading before the fruit is reoriented instead of placed - a hard stop
+    # in _placement_for, not merely a confidence cut: groove_crosscheck()
+    # cuts confidence by 0.6 on a disagreement, and 0.9 x 0.6 = 0.54 still
+    # clears min_angle_confidence on its own.
+    #
+    # Opened at the same value as max_estimator_disagreement_deg above as a
+    # principled starting point, not a measured one: that threshold was set
+    # from 802 hand-labelled fruit bucketed by keypoint-vs-shape
+    # disagreement; this one has not yet had the equivalent table run
+    # against groove disagreement specifically. Measure that breakdown and
+    # move this to match what your line's data actually shows before trusting
+    # it at volume the way the other thresholds in this file have been.
+    max_groove_disagreement_deg: 30.0
+
+  # ---------------------------------------------------------------------------
+  # frame: map the vision angle onto the machine's angle.
+  #
+  # Vision convention: 0 = stem points right on screen, 90 = stem points up,
+  # counter-clockwise positive. Almost certainly not what the actuator uses.
+  #
+  # Commissioning procedure:
+  #   1. backend: "simulator" - a known angle sweeps 0..360 at 30 deg/s.
+  #   2. Watch what the PLC receives against what the HMI shows.
+  #   3. If it counts the opposite way round, set angle_invert: true.
+  #   4. Add the constant difference into angle_offset_deg.
+  # Both are commissioning values, set once per machine. Never patch this in
+  # code - the next machine will need different numbers.
+  # ---------------------------------------------------------------------------
+  frame:
+    angle_offset_deg: 0.0
+    angle_invert: false
+
+# =============================================================================
+# CAMERA
+# =============================================================================
+camera:
+  # source: "camera" for the live camera, "folder" to run the application on
+  # raw images.
+  #
+  # Use "folder" for tuning. On a moving belt every frame shows a different
+  # paprika, so if a result changes you cannot tell whether that came from your
+  # setting or from the next fruit. With a fixed folder the image is identical,
+  # so every difference is attributable to what you changed - that turns tuning
+  # thresholds and fixing the angle convention into a measurement rather than a
+  # feeling.
+  source: "folder"
+
+  folder:
+    path: "data/datasets/rotate_v1/images/test"   # ROTATE TEST: the 65 frames the model never saw
+    interval_s: 3.0        # ROTATE TEST: a little more time per frame
+    loop: true             # start over at the end
+    # hold: true stays on one image until you click on in the HMI. Needed when
+    # you want to study one difficult fruit instead of a sequence.
+    hold: false
+
+  device_name: "DFK 22BUC03"
+  index: 0
+  width: 1280
+  height: 1024
+  flip: -1
+
+  # Pin exposure/gain/white-balance so the driver's auto-exposure cannot drift.
+  #
+  # This matters more here than it did on the OCR machine. The shape estimator
+  # thresholds on absolute saturation, and auto white-balance wanders the
+  # saturation of every pixel in the frame - so an untouched auto setting makes
+  # detection quality change for reasons unrelated to the fruit. It also
+  # poisons the training set: images collected under drifting exposure teach
+  # the model that a paprika's appearance is inherently unstable.
+  #
+  # LOCK THESE BEFORE COLLECTING THE DATASET. Re-collecting is far more
+  # expensive than getting it right now.
+  manual_settings:
+    enabled: false
+    auto_exposure: 0.25      # backend-dependent; try 0.25, then 0, then 1, then 3
+    exposure: -6
+    gain: 0                  # prefer more exposure over more gain - gain adds noise
+    auto_white_balance: 0
+    white_balance: null
+    brightness: null
+    contrast: null
+
+# =============================================================================
+# HMI
+# =============================================================================
+hmi:
+  enable_video_feed: true
+  stream_quality: 75
+  draw_keypoints: true
+  draw_hud: true
+  # Overlay refresh rate. Independent of the 30 fps stream: the stream keeps
+  # running at full speed and redraws the most recent completed result.
+  overlay_interval_s: 0.15
+  # Blank the overlay when the newest result is older than this. Boxes that no
+  # longer line up with the fruit are worse than no boxes.
+  overlay_stale_after_s: 2.0
+  # Keep the overlay off the model while the line is triggering. The overlay
+  # and a trigger share one pose model behind one lock, so a trigger arriving
+  # mid-preview waits a whole forward pass (~88 ms on the Quadro M1200). After
+  # any triggered cycle (PLC or the 'q' key) no new overlay inference starts
+  # for this long, and none starts while a trigger is in flight. One already
+  # running cannot be pre-empted. While paused the live view shows no boxes -
+  # see overlay_stale_after_s - and the HMI rail shows the last triggered
+  # result instead.
+  #
+  # Must be LONGER than the line's trigger interval to have any effect: with
+  # triggers every 2 s and this at 1.5, the overlay wakes in every gap and is
+  # mid-inference again when the next trigger lands. 0 = no pause, the overlay
+  # and the trigger take turns on the model as before. Display only: nothing
+  # here changes what the PLC is told, a counter, or a placement.
+  overlay_pause_after_trigger_s: 3.0
+
+  # Show only the belt in the HMI instead of the whole sensor. The camera also
+  # sees the pale side strips and whatever is behind the line, none of which is
+  # inspectable, and all of which is transmitted thirty times a second and then
+  # scaled down in the browser - so the part the operator needs ends up small.
+  #
+  # Display only. Detection keeps running on the full frame and the PLC is told
+  # about full-frame coordinates; only what is drawn is shifted.
+  crop_to_belt: false        # ROTATE TEST: it looks for the blue belt
+  crop_margin: 0.02        # keep a little around the belt for overhanging fruit
+  crop_refresh_s: 10.0     # a belt does not move, but a camera can be nudged
+
+  # Flip confidence below which the overlay draws "stem end uncertain".
+  #
+  # null means "follow paprika.policy.min_flip_confidence", which is what you
+  # want: the chip then marks exactly the fruit the machine will send round
+  # again, so what the operator sees and what the machine does cannot drift
+  # apart when somebody tunes the policy. Set a number here only to warn
+  # deliberately earlier than the machine acts - for instance while watching
+  # how close a batch is running to the threshold.
+  flip_warning_below: null
+
+web:
+  host: "0.0.0.0"
+  port: 5051                 # ROTATE TEST: next to the belt app on 5050
+
+# =============================================================================
+# PLC
+# =============================================================================
+trigger:
+  enabled: true
+  type: "tcp"
+  host: "127.0.0.1"        # 0.0.0.0 for a real PLC on the network
+  port: 5002               # ROTATE TEST: next to the belt app on 5001
+  trigger_byte: "0x01"
+  response_ok: "OK\n"
+  response_nok: "NOK\n"
+  timeout_s: 5.0
+
+  # In paprika mode the PLC needs an angle, not a verdict. On a placeable
+  # fruit the response is a single semicolon-delimited line:
+  #
+  #     OK;<angle>;<x>;<y>;<pose>;<confidence>\n
+  #     OK;137.4;612;388;lying;0.91
+  #
+  # <angle> is already mapped through paprika.frame, so the PLC consumes it
+  # directly with no conversion. Anything not placeable - no fruit, standing
+  # fruit, uncertain stem end - sends response_nok instead of a number, so the
+  # PLC never has to decide whether a returned angle was trustworthy. That
+  # judgement belongs on this side, where the confidence values live.
+  response_format: "structured"   # "structured" | "okonly"
+
+# =============================================================================
+# OUTPUT
+# =============================================================================
+output:
+  result_dir: "data/rotate/results"        # ROTATE TEST
+
+# -----------------------------------------------------------------------------
+# debug: diagnostic capture. Everything here writes to data/debug/ and nowhere
+# else - no counter, no result, nothing that reaches the PLC.
+# -----------------------------------------------------------------------------
+debug:
+  #An ignored pose disqualifies that fruit, not the frame. A scene with one clipped fruit and one the stem search
+  #failed on is exactly the scene worth keeping, so the search continues past the clipped one instead of stopping
+  #at the first non-placeable thing it meets. The primary is checked first, so when it's itself the interesting
+  #failure the filename carries its verdict rather than a bystander's.
+
+  #ignore_poses: [ ] captures everything again — useful if you ever want to check the edge-clipping logic itself.
+
+  ignore_poses: ["incomplete"]
+
+  # Save the RAW frame behind every non-placeable verdict, so a failure can be
+  # re-run later with:
+  #
+  #     python -m tools.diagnose_frames data/debug/failures
+  #
+  # This is the artefact you cannot reconstruct afterwards. An HMI screenshot
+  # shows the verdict but not the input, and the input is what decides whether
+  # the fault is in the stem search, the split, the segmentation or the policy.
+  #
+  # OFF by default: it costs disk, and a machine running well has no reason to
+  # be writing anything here. Turn it on while investigating, and off again.
+  save_failures: false
+
+  failures_dir: "data/rotate/debug/failures"   # ROTATE TEST
+
+  # A frame is captured when a fruit comes back reorient, reject or unknown.
+  # Frames with NO detections are never captured: an empty belt is the normal
+  # state, so that would save the whole shift. A fruit missed entirely is a
+  # real failure this will not catch - save that one by hand.
+  #
+  # Two limits, and the interval matters more than it looks. A belt that stops
+  # with one rejected fruit under the camera reproduces the same failure at the
+  # overlay rate indefinitely; without a minimum gap you would return to tens of
+  # thousands of copies of one pepper.
+  max_failures_per_run: 200
+  min_interval_s: 2.0
+
+  # The engine's own verdict, written alongside each frame. Cheap, and it is
+  # what lets you tell "the detector saw it differently that day" from "the
+  # detector sees it differently now".
+  save_result_json: true
+
+  # png or jpg. Default png, and measured rather than assumed: these frames are
+  # an INPUT to segmentation, and re-encoding moves the answer. Across ten
+  # fruit, JPEG at quality 95 shifted the reported stem angle by up to 4.1
+  # degrees and at quality 80 by 8.1; PNG shifted it by exactly zero on every
+  # one. Against a max_stem_spread_deg of 6.0 that is not a rounding
+  # difference - a frame saved as JPEG can cross the stability threshold purely
+  # by being saved, and you would spend the afternoon investigating the
+  # compression rather than the fault.
+  #
+  # Costs about 1.2 MB a frame against 160 KB. Switch to jpg only if disk is
+  # genuinely tight, and then treat small angle differences with suspicion.
+  image_format: "png"
+  jpeg_quality: 95
+
+# -----------------------------------------------------------------------------
+# capture: press a key to keep the frame in front of you.
+#
+# For fruit the detector gets wrong. By the time anyone reaches a terminal the
+# belt has moved on and the frame is gone, so the failure gets described from
+# memory instead of reproduced - and a failure that cannot be reproduced cannot
+# be fixed.
+#
+# Saves the RAW frame, no overlay: an overlaid frame is a picture of an answer
+# and cannot be re-run, re-labelled or trained on. The overlay goes in the
+# sidecar JSON instead.
+#
+# Feed them back with:
+#   python -m tools.label_stems data/captures
+#   python -m tools.export_dataset data/captures --out data/datasets/paprika_v2
+# -----------------------------------------------------------------------------
+capture:
+  enabled: true
+  # Anything the keyboard package understands: "c", "f12", "ctrl+shift+s".
+  # Avoid "q" - that is the manual vision trigger.
+  hotkey: "c"
+  directory: "data/rotate/captures"   # ROTATE TEST: NOT data/captures - the belt training reads that folder
+  save_result_json: true
+
+  # png or jpg. Default png, and measured rather than assumed: these frames are
+  # an input to segmentation and to a model, and re-encoding moves the answer.
+  # Over ten fruit, JPEG at quality 95 shifted the reported stem angle by up to
+  # 4.1 degrees and at quality 80 by 8.1; PNG shifted it by exactly zero on
+  # every one. Against a max_stem_spread_deg of 6.0 that is not a rounding
+  # difference. Costs about 1.2 MB a frame against 160 KB.
+  image_format: "png"
+  jpeg_quality: 95
+
+  # Two presses inside this window count as one. A held key repeats, and an
+  # operator reaching across a machine does not press cleanly.
+  min_interval_s: 0.75
+
+database:
+  url: "sqlite:///data/rotate_results.db"   # ROTATE TEST
+
+security: {}

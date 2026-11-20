@@ -195,6 +195,7 @@ class PaprikaDetector:
         self._model_path = str(project_path(pose_cfg.get("model_path"), "models/paprika_pose.pt"))
         self._imgsz = int(pose_cfg.get("imgsz", 640))
         self._kp_confidence = float(pose_cfg.get("keypoint_confidence", 0.30))
+        self._edge_cut = float(pose_cfg.get("edge_cut_threshold", BBOX_EDGE_CUT_THRESHOLD))
         self._cudnn_benchmark = bool(pose_cfg.get("cudnn_benchmark", True))
         self._is_onnx = self._model_path.lower().endswith(".onnx")
 
@@ -687,7 +688,7 @@ class PaprikaDetector:
 
                 clipped = self._bbox_edge_cut(
                     (x1, y1, x2, y2), frame.shape
-                ) > BBOX_EDGE_CUT_THRESHOLD
+                ) > self._edge_cut
                 detections.append(
                     {
                         "bbox": [x1, y1, x2, y2],

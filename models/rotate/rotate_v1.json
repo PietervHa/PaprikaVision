@@ -1,0 +1,49 @@
+{
+ "name": "rotate_v1",
+ "made": "2026-11-20 09:50:48",
+ "minutes_this_session": 124.5,
+ "resumed": true,
+ "dataset": "rotate_v1",
+ "dataset_counts": {
+  "train": 282,
+  "val": 73,
+  "test": 65
+ },
+ "base": "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\models\\paprika_pose.pt",
+ "imgsz": 640,
+ "train_args": {
+  "epochs": 150,
+  "patience": 30,
+  "batch": 8,
+  "degrees": 10.0,
+  "workers": 2,
+  "device": null,
+  "imgsz": 640
+ },
+ "run_dir": "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\runs\\rotate\\rotate_v1",
+ "weights": "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\models\\rotate\\rotate_v1.pt",
+ "onnx": "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\models\\rotate\\rotate_v1.onnx",
+ "ultralytics": "8.3.40",
+ "points": [
+  "end of the straight part of the stem",
+  "stem base"
+ ],
+ "angle": "point 1 -> point 0, -180..180 degrees, 0 = +X, y down",
+ "test": {
+  "split": "test",
+  "frames": 65,
+  "stem_frames": 56,
+  "answered_percent": 100.0,
+  "median_error": 4.108903155207564,
+  "p90_error": 12.71559130062927,
+  "within_5": 53.57142857142857,
+  "within_10": 82.14285714285714,
+  "within_15": 96.42857142857143,
+  "flips": 0,
+  "no_stem_frames": 9,
+  "no_stem_with_angle": 0,
+  "empty_frames": 0,
+  "empty_with_paprika": 0,
+  "pictures": "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\data\\debug\\rotate_score\\rotate_v1_test"
+ }
+}
