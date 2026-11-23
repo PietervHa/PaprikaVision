@@ -205,7 +205,7 @@ paprika:
     edge_cut_threshold: 0.30
 
   pose:
-    model_path: "models/rotate/rotate_v1.pt"   # ROTATE TEST: the .pt - the .onnx needs an export record in rotate_v1.json
+    model_path: "models/rotate/rotate_v2.pt"   # ROTATE TEST: the .pt - the .onnx needs an export record in rotate_v1.json
     # Where the model runs: "auto", "cpu", or a CUDA index such as "0".
     # "auto" is the NVIDIA GPU when the runtime can use one, otherwise the CPU;
     # an .onnx under the plain onnxruntime package always runs on the CPU. An
