@@ -134,7 +134,10 @@ def draw_detections(
         is_primary = (
             primary_center is not None and detection.get("center") == list(primary_center)
         )
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3 if is_primary else 1)
+        # draw_box False: the box is only an anchor for the label (the rotate engine's model finds the
+        # stem, not the fruit's outline - a box around the stem says nothing); arrow and label stay.
+        if detection.get("draw_box", True):
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3 if is_primary else 1)
 
         orientation = detection.get("orientation") or {}
         angle = orientation.get("angle_deg")

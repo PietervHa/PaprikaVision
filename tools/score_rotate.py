@@ -103,9 +103,8 @@ def predict(model, image, imgsz: int, conf: float, kp_conf: float, min_len_px: f
         base, tip = list(points[model.angle_from]), list(points[model.angle_to])
         length = math.hypot(tip[0] - base[0], tip[1] - base[1])
         has = tip[2] >= kp_conf and base[2] >= kp_conf and length >= min_len_px
-        xs, ys = (base[0], tip[0]), (base[1], tip[1])
         return {"paprika": max(tip[2], base[2]) >= kp_conf, "score": max(tip[2], base[2]),
-                "box": [min(xs) - 40, min(ys) - 40, max(xs) + 40, max(ys) + 40], "tip": tip, "base": base,
+                "box": None, "tip": tip, "base": base,       # no box: the model finds the stem, not the fruit
                 "has_angle": has, "angle": angle_of(base, tip) if has else None, "point_conf": min(tip[2], base[2])}
     r = model.predict(image, imgsz=imgsz, conf=conf, verbose=False)[0]
     if r.boxes is None or len(r.boxes) == 0:
@@ -141,8 +140,9 @@ def draw(image, truth: dict | None, pred: dict, caption: str):
     if truth and truth.get("status") == "stem":
         arrow(truth["base"], truth["tip"], GREEN)
     if pred.get("paprika"):
-        x1, y1, x2, y2 = (int(round(c)) for c in pred["box"])
-        cv2.rectangle(view, (x1, y1), (x2, y2), MAGENTA, 2)
+        if pred.get("box"):                       # YOLO's paprika box; the own model has none
+            x1, y1, x2, y2 = (int(round(c)) for c in pred["box"])
+            cv2.rectangle(view, (x1, y1), (x2, y2), MAGENTA, 2)
         if pred["has_angle"]:
             arrow(pred["base"], pred["tip"], MAGENTA)
     cv2.rectangle(view, (0, 0), (view.shape[1], 44), (0, 0, 0), -1)

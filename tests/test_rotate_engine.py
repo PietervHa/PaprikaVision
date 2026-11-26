@@ -110,3 +110,17 @@ def test_the_overlay_draws_it(tmp_path):
     middle = r["primary"]["center"][1]
     assert column[:middle - 10].sum() > column[middle + 10:].sum()
     assert math.isfinite(r["primary"]["orientation"]["angle_deg"])
+
+
+def test_no_box_for_the_rotate_unit_but_still_for_the_belt(tmp_path):
+    from backend.utils import annotate
+    frame = np.zeros((256, 400, 3), np.uint8)
+    r = _engine(_model(tmp_path)).evaluate(frame)
+    assert r["primary"]["draw_box"] is False
+    drawn = annotate.draw_detections(frame.copy(), r["detections"])
+    x1, y1, x2, y2 = r["primary"]["bbox"]
+    assert not drawn[y2, x1:x2].any() and not drawn[y1 + 30:y2, x2].any()    # no rectangle edges
+    belt = {"bbox": [50, 60, 150, 160], "center": [100, 110], "placement": "place", "label": "x",
+            "orientation": {"angle_deg": 0.0}}
+    drawn = annotate.draw_detections(np.zeros((256, 400, 3), np.uint8), [belt])
+    assert drawn[160, 60:140].any()                                          # the belt keeps its box

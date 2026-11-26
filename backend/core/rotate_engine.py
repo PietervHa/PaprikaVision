@@ -160,7 +160,8 @@ class RotateEngine:
                                         stem_present=False, notes=[f"point confidence {base[2]:.2f} / {end[2]:.2f}, "
                                                                    f"threshold {thr:.2f}"])
             label = "no stem"
-        # A box around the stem, only for drawing: the model finds the stem, not the fruit's outline.
+        # A box around the stem, only as the anchor for the overlay's label - not drawn (draw_box False):
+        # the model finds the stem, not the fruit's outline, so a box would suggest something it is not.
         margin = max(40.0, 0.6 * length)
         xs, ys = (base[0], end[0]), (base[1], end[1])
         x1, y1 = max(0.0, min(xs) - margin), max(0.0, min(ys) - margin)
@@ -169,6 +170,7 @@ class RotateEngine:
         return {
             "label": label,
             "bbox": [int(x1), int(y1), int(x2), int(y2)],
+            "draw_box": False,
             "center": [int((base[0] + end[0]) / 2), int((base[1] + end[1]) / 2)],
             "confidence": round(float(max(base[2], end[2])), 3),
             "keypoints": {
