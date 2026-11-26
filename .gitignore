@@ -5,6 +5,7 @@ __pycache__/
 data/logs/
 data/results/
 data/results.db
+data/rotate_results.db
 data/debug/
 data/datasets/
 data/raw/
