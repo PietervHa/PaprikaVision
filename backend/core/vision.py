@@ -26,10 +26,23 @@ _app_state: Optional[Any] = None
 _pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision_worker")
 
 
+def _make_engine(app_state):
+    """paprika.engine in the config: "belt" (default) - PaprikaEngine - or "rotate" - RotateEngine,
+    the rotate unit with MDE's own stem model. Both return the same result contract."""
+    block = cfg.get("paprika") if isinstance(cfg.get("paprika"), dict) else {}
+    kind = str(block.get("engine", "belt")).strip().lower()
+    if kind == "rotate":
+        from backend.core.rotate_engine import RotateEngine
+        return RotateEngine(cfg, app_state=app_state)
+    if kind not in ("belt", "paprika"):
+        logger.warning("paprika.engine %r unknown - using the belt engine", kind)
+    return PaprikaEngine(cfg, app_state=app_state)
+
+
 def bind_app_state(app_state) -> None:
     global _engine, _app_state
     _app_state = app_state
-    _engine = PaprikaEngine(cfg, app_state=app_state)
+    _engine = _make_engine(app_state)
     logger.info("Vision bound: %s", _engine.status())
 
 

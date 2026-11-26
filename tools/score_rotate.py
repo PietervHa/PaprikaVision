@@ -4,6 +4,7 @@
     python -m tools.score_rotate models/rotate/rotate_v1.pt --split val
     python -m tools.score_rotate models/rotate/rotate_v1.pt --unlabelled      draw on the frames nobody labelled
     python -m tools.score_rotate models/rotate/rotate_v1.onnx                 the ONNX export gives the same numbers
+    python -m tools.score_rotate models/rotate/rotate_kp.onnx                 MDE's own model (no YOLO), see below
 
 Against the label, per frame:
     stem      did the model give an angle, and how far off was it: median, p90, within 5/10/15
@@ -15,6 +16,13 @@ Pictures - label green, model magenta - of the worst frames and of every flip, m
 false angle go to data/debug/rotate_score/<model>_<split>/. With --unlabelled every frame in
 data/rotate/raw that has no label is drawn into data/debug/rotate_predict/<model>/, to look at.
 
+MDE's own keypoint model (MDE Annotation: runs_keypoints/<name>/model.onnx, here as rotate_kp.onnx
+with model.json next to it as rotate_kp.json) is recognised by that json ("mde-keypoints-1") and run
+the way the app's rotate engine runs it (backend/detection/paprika/rotate_keypoints.py): the whole
+frame, two points, no paprika box. Its defaults come from the training - the point threshold from
+the json, 2 px minimum stem length, the dataset from the json - so the numbers match the TEST line
+MDE Annotation printed; --kp-conf / --min-length / --dataset override them.
+
 The angle is the one the labels and the PLC use: from the stem base (point 1) to the end of the
 straight part of the stem (point 0), -180..180 degrees, 0 = +X, y down.
 """
@@ -23,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
 import sys
 from pathlib import Path
@@ -50,7 +59,19 @@ def angle_error(a: float, b: float) -> float:
 
 # ------------------------------------------------------------------ the model
 
+def is_mde_keypoints(path: Path) -> bool:
+    meta = path.with_suffix(".json")
+    if path.suffix != ".onnx" or not meta.exists():
+        return False
+    return json.loads(meta.read_text(encoding="utf-8")).get("format") == "mde-keypoints-1"
+
+
 def load_model(path: Path):
+    if is_mde_keypoints(path):
+        from backend.detection.paprika.rotate_keypoints import RotateKeypointModel
+        model = RotateKeypointModel(path, threads=max(1, (os.cpu_count() or 2) - 1))
+        model.load_model()
+        return model
     from ultralytics import YOLO          # only here: the rest of this file runs without it
     return YOLO(str(path), task="pose")
 
@@ -77,6 +98,15 @@ def model_imgsz(path: Path, fallback: int) -> int:
 def predict(model, image, imgsz: int, conf: float, kp_conf: float, min_len_px: float) -> dict:
     """The model's answer for one frame: one paprika (the most confident), its two points, and
     an angle when both points are confident and far enough apart."""
+    if hasattr(model, "angle_from"):                # MDE's own keypoint model: two points, no paprika box
+        points = model.predict(image)
+        base, tip = list(points[model.angle_from]), list(points[model.angle_to])
+        length = math.hypot(tip[0] - base[0], tip[1] - base[1])
+        has = tip[2] >= kp_conf and base[2] >= kp_conf and length >= min_len_px
+        xs, ys = (base[0], tip[0]), (base[1], tip[1])
+        return {"paprika": max(tip[2], base[2]) >= kp_conf, "score": max(tip[2], base[2]),
+                "box": [min(xs) - 40, min(ys) - 40, max(xs) + 40, max(ys) + 40], "tip": tip, "base": base,
+                "has_angle": has, "angle": angle_of(base, tip) if has else None, "point_conf": min(tip[2], base[2])}
     r = model.predict(image, imgsz=imgsz, conf=conf, verbose=False)[0]
     if r.boxes is None or len(r.boxes) == 0:
         return {"paprika": False, "has_angle": False}
@@ -225,8 +255,10 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--imgsz", type=int, default=None, help="default: the size the model was trained at")
     parser.add_argument("--conf", type=float, default=0.25, help="paprika detection confidence")
-    parser.add_argument("--kp-conf", type=float, default=0.5, help="both points at least this confident for an angle")
-    parser.add_argument("--min-length", type=float, default=20.0, help="base to tip at least this many pixels for an angle")
+    parser.add_argument("--kp-conf", type=float, default=None,
+                        help="both points at least this confident for an angle (YOLO: 0.5; own model: its json)")
+    parser.add_argument("--min-length", type=float, default=None,
+                        help="base to tip at least this many pixels for an angle (YOLO: 20; own model: 2)")
     args = parser.parse_args()
 
     path = Path(args.model)
@@ -235,13 +267,24 @@ def main() -> int:
         return 1
     imgsz = args.imgsz or model_imgsz(path, 640)
     model = load_model(path)
+    own = hasattr(model, "angle_from")
+    if args.kp_conf is None:
+        args.kp_conf = model.threshold if own else 0.5
+    if args.min_length is None:
+        args.min_length = 2.0 if own else 20.0
+    if own:
+        print(f"MDE keypoint model {path.name}: input {model.input_w}x{model.input_h}, point threshold {args.kp_conf} "
+              f"({'--kp-conf' if model.threshold != args.kp_conf else model.settings_source}), minimum stem {args.min_length} px")
     name = path.stem + ("_onnx" if path.suffix == ".onnx" else "")
     if args.unlabelled:
         draw_unlabelled(model, name, imgsz, args.conf, args.kp_conf, args.min_length, Path(args.frames), args.limit)
         return 0
     dataset = args.dataset
     if dataset is None and path.with_suffix(".json").exists():
-        dataset = json.loads(path.with_suffix(".json").read_text(encoding="utf-8")).get("dataset")
+        meta = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+        dataset = meta.get("dataset")
+        if dataset is None and meta.get("data"):              # own model: .../datasets/<name>/data.yaml
+            dataset = Path(str(meta["data"]).replace("\\", "/")).parent.name
     if dataset is None:
         print("which dataset? give --dataset rotate_v1")
         return 1

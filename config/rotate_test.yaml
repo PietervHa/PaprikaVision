@@ -1,8 +1,13 @@
-# ROTATE TEST - the rotate-unit model on rotate frames, without the belt's decision rules.
+# ROTATE TEST - the rotate unit through this app, with MDE's own stem model (no YOLO).
 # A copy of default.yaml; every change is marked ROTATE TEST. Start with:
 #     .venv\Scripts\python.exe -m backend.main --config config\rotate_test.yaml
-# HMI: http://localhost:5051 (the belt app keeps 5050). Judge the arrow, not the confidence:
-# the confidence formula here is the belt's and comes out low for rotate stems.
+# HMI: http://localhost:5051 (the belt app keeps 5050).
+#
+# paprika.engine: rotate runs the RotateEngine (backend/core/rotate_engine.py) instead of the belt
+# engine: one model, one rule - an angle when both stem points are confident, else "no stem". The
+# belt settings further down (span ratio, end-on, fallbacks, ...) are not used by it.
+# The model: MDE Annotation's runs_keypoints\<name>\model.onnx and model.json, copied to
+# models\rotate\rotate_kp.onnx and models\rotate\rotate_kp.json (the threshold is in the json).
 #
 # PaprikaVisionMDE configuration
 #
@@ -17,6 +22,13 @@ machine_id: "paprika-rotate-test"   # ROTATE TEST
 # PAPRIKA DETECTION AND ORIENTATION
 # =============================================================================
 paprika:
+
+  # ROTATE TEST: which engine - "belt" (default) or "rotate" (MDE's own stem model, see the top)
+  engine: rotate
+  rotate:
+    model_path: "models/rotate/rotate_kp.onnx"   # + rotate_kp.json next to it
+    threads: 1                 # as on the IPC; more only makes the test faster
+    point_threshold: null      # null = the threshold in rotate_kp.json, tuned on the validation frames
 
   # ---------------------------------------------------------------------------
   # backend: which detector finds the fruit.
@@ -545,7 +557,7 @@ camera:
   index: 0
   width: 1280
   height: 1024
-  flip: -1
+  flip: null
 
   # Pin exposure/gain/white-balance so the driver's auto-exposure cannot drift.
   #

@@ -1,0 +1,66 @@
+{
+ "format": "mde-keypoints-1",
+ "input": {
+  "width": 512,
+  "height": 384,
+  "layout": "NCHW",
+  "color": "RGB",
+  "scale": "0..1 (pixel / 255)",
+  "letterbox": "centred, pad 114",
+  "normalisation": "inside the model"
+ },
+ "output": {
+  "points": "[1, K, 3]: x, y in input pixels, confidence"
+ },
+ "points": 2,
+ "angle": {
+  "from": 1,
+  "to": 0,
+  "convention": "-180..180, 0 = +X, y down"
+ },
+ "threshold": 0.1,
+ "backbone": "mobilenet_v3_large",
+ "pretrained": false,
+ "best_epoch": 47,
+ "data": "C:\\Users\\Pieter van Haaften\\Documents\\PaprikaVisionMDE\\data\\datasets\\rotate_v1\\data.yaml",
+ "results": {
+  "best_epoch": 47,
+  "threshold": 0.1,
+  "val": {
+   "frames": 73,
+   "objects": 73,
+   "objects_with_angle": 67,
+   "answered_percent": 100.0,
+   "median": 2.88,
+   "p90": 10.16,
+   "within_5": 76.1,
+   "within_10": 89.6,
+   "within_15": 97.0,
+   "flips": 0,
+   "missed_angles": 0,
+   "objects_without_angle": 6,
+   "false_angles": 0,
+   "missed_objects": 0,
+   "extra_objects": 0
+  },
+  "val_score": 3.5539611182828263,
+  "test": {
+   "frames": 65,
+   "objects": 65,
+   "objects_with_angle": 56,
+   "answered_percent": 100.0,
+   "median": 2.76,
+   "p90": 9.79,
+   "within_5": 64.3,
+   "within_10": 91.1,
+   "within_15": 98.2,
+   "flips": 0,
+   "missed_angles": 0,
+   "objects_without_angle": 9,
+   "false_angles": 0,
+   "missed_objects": 0,
+   "extra_objects": 0
+  },
+  "test_score": 3.8791085899954414
+ }
+}
